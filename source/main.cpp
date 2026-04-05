@@ -785,6 +785,51 @@ static void dbApplyStage(SqlDb& db, const std::string& loadGuid) {
     }
 }
 
+static void dbApplyNon4Statuses(SqlDb& db, const std::string& loadGuid) {
+    std::ostringstream q;
+    q
+        << ";WITH latest_stage AS ("
+        << " SELECT s.*, ROW_NUMBER() OVER ("
+        << " PARTITION BY s.MATCHED_MSS_SEMD_DOC_ID"
+        << " ORDER BY s.modifiedDate DESC, s.[date] DESC, s.STAGE_ID DESC"
+        << " ) AS rn"
+        << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
+        << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "'"
+        << " AND s.MATCHED_MSS_SEMD_DOC_ID IS NOT NULL"
+        << " AND s.[status] IS NOT NULL"
+        << " AND s.[status] <> 4"
+        << " )"
+        << " UPDATE d SET"
+        << " d.NETRIKA_STATUS = s.[status],"
+        << " d.NETRIKA_STATUS_TEXT = LEFT(ISNULL(s.statusText, ''), 255),"
+        << " d.NETRIKA_MESSAGE = LEFT(ISNULL(s.[message], ''), 4000),"
+        << " d.NETRIKA_MODIFIED_DATE = s.modifiedDate,"
+        << " d.NETRIKA_EVENT_DATE = s.[date],"
+        << " d.NETRIKA_IDDOCUMENTMIS = LEFT(ISNULL(s.idDocumentMis, ''), 100),"
+        << " d.NETRIKA_IDSOURCE = LEFT(ISNULL(s.idSource, ''), 100),"
+        << " d.NETRIKA_IDFEDREQUEST = LEFT(ISNULL(s.idFedRequest, ''), 100),"
+        << " d.NETRIKA_REMD_REG_NUMBER = LEFT(ISNULL(s.remdRegNumber, ''), 100),"
+        << " d.NETRIKA_GOAL_TEXT = LEFT(ISNULL(s.goalText, ''), 255),"
+        << " d.NETRIKA_SOURCE_TYPE_NAME = LEFT(ISNULL(s.sourceTypeName, ''), 100),"
+        << " d.NETRIKA_EMD_TYPE_ID = s.emdTypeId,"
+        << " d.NETRIKA_IEMK_TYPE_ID = s.iemkTypeId,"
+        << " d.NETRIKA_ORGANIZATION = LEFT(ISNULL(s.organization, ''), 255),"
+        << " d.NETRIKA_DEPARTMENT = LEFT(ISNULL(s.department, ''), 255),"
+        << " d.NETRIKA_CHECK_DATE = GETDATE(),"
+        << " d.NETRIKA_MATCH_METHOD = ISNULL(s.MATCH_METHOD, 'MOTCONSU_ID')"
+        << " FROM dbo.MSS_SEMD_DOC d"
+        << " INNER JOIN latest_stage s"
+        << " ON d.MSS_SEMD_DOC_ID = s.MATCHED_MSS_SEMD_DOC_ID"
+        << " AND s.rn = 1;";
+
+    std::string err;
+    if (!db.exec(q.str(), &err)) {
+        g_log.error("Apply non-4 statuses failed: %s", err.c_str());
+    } else {
+        g_log.info("Applied non-4 statuses for LOAD_GUID=%s", loadGuid.c_str());
+    }
+}
+
 static void pollOnce(SqlDb& db, const Config& cfg) {
     std::string today = todayYmd();
     std::string dateBegin = cfg.date_begin.empty() ? today : cfg.date_begin;
@@ -890,6 +935,7 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
 
     g_log.info("Applying EventLog statuses for LOAD_GUID=%s totalRows=%zu", loadGuid.c_str(), totalRows);
     dbApplyStage(db, loadGuid);
+    dbApplyNon4Statuses(db, loadGuid);
     g_log.info("Applied EventLog statuses for LOAD_GUID=%s totalRows=%zu", loadGuid.c_str(), totalRows);
 }
 
