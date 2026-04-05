@@ -1,0 +1,32 @@
+select * from netrika.dbo.mss_keys
+
+USE master;
+GO
+CREATE LOGIN [mss_semd_checking]
+WITH PASSWORD = 'l+Dg-Z60>37S', CHECK_POLICY = OFF, CHECK_EXPIRATION = OFF;
+GO
+
+USE Netrika;
+GO
+CREATE TABLE dbo.mss_keys(
+    mss_program varchar(128) NOT NULL PRIMARY KEY,
+    CodeKey varchar(max) NOT NULL,
+    updated_at datetime2(0) NOT NULL DEFAULT(sysdatetime())
+);
+GO
+
+use netrika;IF NOT EXISTS (SELECT 1 FROM dbo.mss_keys WHERE mss_program='mss_semd_checking')
+BEGIN
+    INSERT INTO dbo.mss_keys(mss_program, CodeKey)
+    VALUES ('mss_semd_checking', '');
+END
+GO
+
+USE Netrika;
+GO
+UPDATE dbo.mss_keys
+SET
+    CodeKey = 'eyJleHBpcmVzX3V0YyI6IjIwMjYtMTItMzFUMjM6NTk6NTlaIiwicHJvZHVjdF9jb2RlIjoiTUhoRFFrRkdRa016UkVRM1F6QTJOVFEyT1VWR01qSTROak0wTmtNMFJqVTJOM3d5TURJMkxUQXpMVEUySURFd09qRTRPalF6In0.de5d_7LEAebCBiubHQFHx2P8Wc0X1bHPQAPtjtJHtPE'
+WHERE mss_program = 'mss_semd_checking';
+GO
+select * from netrika.dbo.mss_keys

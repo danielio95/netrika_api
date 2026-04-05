@@ -1,0 +1,16 @@
+$headers = @{
+    "Authorization" = "N3 8088fb1f-0b22-473e-a812-b5dc1b0af431"
+    "Content-Type"  = "application/json"
+}
+
+$body = @{
+    dateBegin = "2024-04-09"
+    dateEnd   = "2024-04-09"
+    startRow  = 0
+    endRow    = 100
+} | ConvertTo-Json
+
+Invoke-WebRequest -Uri "https://b2b.n3health.ru/n3h-eventlog-api/EventLog/GetEvents" `
+    -Method POST `
+    -Headers $headers `
+    -Body $body

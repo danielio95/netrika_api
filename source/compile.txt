@@ -1,0 +1,2 @@
+cl /std:c++17 /O2 /EHsc /DUNICODE /D_UNICODE main.cpp /Fe:mss_semd_checking.exe /link winhttp.lib odbc32.lib bcrypt.lib advapi32.lib crypt32.lib ole32.lib
+x64 native tools command prompt
