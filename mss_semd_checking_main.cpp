@@ -284,6 +284,53 @@ public:
         return true;
     }
 
+    bool queryRows(const std::string& sql, int columnCount, std::vector<std::vector<std::string>>& rows, std::string& err) {
+        rows.clear();
+        if (columnCount <= 0) {
+            err = "columnCount must be > 0";
+            return false;
+        }
+
+        SQLHSTMT stmt = nullptr;
+        if (SQLAllocHandle(SQL_HANDLE_STMT, hdbc_, &stmt) != SQL_SUCCESS) {
+            err = "SQLAllocHandle STMT failed";
+            return false;
+        }
+
+        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+            err = collectDiag(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            return false;
+        }
+
+        while ((rc = SQLFetch(stmt)) == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO) {
+            std::vector<std::string> row;
+            row.reserve((size_t)columnCount);
+            for (int col = 1; col <= columnCount; ++col) {
+                char buf[4096]{};
+                SQLLEN ind = 0;
+                SQLRETURN rd = SQLGetData(stmt, (SQLUSMALLINT)col, SQL_C_CHAR, buf, sizeof(buf), &ind);
+                if (!(rd == SQL_SUCCESS || rd == SQL_SUCCESS_WITH_INFO)) {
+                    err = collectDiag(SQL_HANDLE_STMT, stmt);
+                    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                    return false;
+                }
+                row.emplace_back(ind == SQL_NULL_DATA ? "" : std::string(buf));
+            }
+            rows.emplace_back(std::move(row));
+        }
+
+        if (rc != SQL_NO_DATA) {
+            err = collectDiag(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            return false;
+        }
+
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return true;
+    }
+
 private:
     SQLHENV henv_ = nullptr;
     SQLHDBC hdbc_ = nullptr;
@@ -709,6 +756,55 @@ static void dbApplyStage(SqlDb& db, const std::string& loadGuid) {
     }
 }
 
+static void logLeftoverNetrikaStatusesToStdout(SqlDb& db, const std::string& loadGuid) {
+    std::ostringstream q;
+    q << "SELECT idDocumentMis, ISNULL(CONVERT(varchar(20), [status]), ''), ISNULL(statusText, ''), "
+      << "ISNULL([message], '') "
+      << "FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE "
+      << "WHERE LOAD_GUID = '" << sqlEscape(loadGuid) << "' "
+      << "  AND MATCHED_MSS_SEMD_DOC_ID IS NULL "
+      << "  AND ( [status] IS NOT NULL OR ISNULL(statusText, '') <> '' OR ISNULL([message], '') <> '' ) "
+      << "ORDER BY STAGE_ID;";
+
+    std::vector<std::vector<std::string>> rows;
+    std::string err;
+    if (!db.queryRows(q.str(), 4, rows, err)) {
+        g_log.error("Failed to query leftover NETRIKA statuses for LOAD_GUID=%s: %s", loadGuid.c_str(), err.c_str());
+        return;
+    }
+
+    if (rows.empty()) return;
+
+    std::ostringstream head;
+    head << "LEFTOVER NETRIKA STATUSES (no MSS_SEMD_DOC match), LOAD_GUID=" << loadGuid
+         << ", rows=" << rows.size();
+    std::string headLine = head.str();
+    std::cout << headLine << std::endl;
+    std::fflush(stdout);
+    g_log.warn("%s", headLine.c_str());
+
+    const size_t maxPrint = 200;
+    for (size_t i = 0; i < rows.size() && i < maxPrint; ++i) {
+        const auto& r = rows[i];
+        std::ostringstream line;
+        line << "  [" << (i + 1) << "] idDocumentMis=" << r[0]
+             << " status=" << r[1]
+             << " statusText=" << r[2]
+             << " message=" << r[3];
+        std::string s = line.str();
+        std::cout << s << std::endl;
+        std::fflush(stdout);
+    }
+
+    if (rows.size() > maxPrint) {
+        std::ostringstream tail;
+        tail << "  ... truncated: printed " << maxPrint << " of " << rows.size() << " leftover rows";
+        std::string t = tail.str();
+        std::cout << t << std::endl;
+        std::fflush(stdout);
+    }
+}
+
 static void pollOnce(SqlDb& db, const Config& cfg) {
     g_log.info("Poll tick: requesting EventLog/GetEvents for today...");
 
@@ -760,6 +856,7 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
     }
 
     dbApplyStage(db, loadGuid);
+    logLeftoverNetrikaStatusesToStdout(db, loadGuid);
     g_log.info("Applied EventLog statuses for LOAD_GUID=%s", loadGuid.c_str());
 }
 
