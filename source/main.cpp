@@ -721,6 +721,10 @@ static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
     return ids;
 }
 
+static std::string jsonGetStr(const json& e, const char* key);
+static std::string jsonGetIntSql(const json& e, const char* key);
+static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const json& e);
+
 static size_t fetchEventsToStage(SqlDb& db,
                                  const Config& cfg,
                                  const std::string& loadGuid,
