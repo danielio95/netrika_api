@@ -112,6 +112,7 @@ public:
         if (dir_.empty()) return false;
         CreateDirectoryA(dir_.c_str(), nullptr);
         filePath_ = dir_ + "\\mss_semd_checking.log";
+        ensureUtf8Bom();
         return true;
     }
 
@@ -129,6 +130,27 @@ private:
     std::mutex mu_;
     std::string dir_;
     std::string filePath_;
+
+    void ensureUtf8Bom() {
+        FILE* f = nullptr;
+        fopen_s(&f, filePath_.c_str(), "rb");
+        bool needBom = false;
+        if (!f) {
+            needBom = true;
+        } else {
+            fseek(f, 0, SEEK_END);
+            needBom = (ftell(f) == 0);
+            fclose(f);
+        }
+        if (needBom) {
+            fopen_s(&f, filePath_.c_str(), "ab");
+            if (f) {
+                const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+                fwrite(bom, 1, sizeof(bom), f);
+                fclose(f);
+            }
+        }
+    }
 
     static std::string nowStr() {
         SYSTEMTIME st; GetLocalTime(&st);
@@ -153,8 +175,16 @@ private:
             fclose(f);
         }
         if (g_consoleMode.load()) {
-            std::fwrite(line.data(), 1, line.size(), stdout);
-            std::fflush(stdout);
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD mode = 0;
+            if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode)) {
+                std::wstring wline = utf8ToWide(line);
+                DWORD written = 0;
+                WriteConsoleW(hOut, wline.c_str(), (DWORD)wline.size(), &written, nullptr);
+            } else {
+                std::fwrite(line.data(), 1, line.size(), stdout);
+                std::fflush(stdout);
+            }
         }
     }
 };
@@ -1159,6 +1189,8 @@ int main(int argc, char* argv[]) {
 
     if (argc >= 4 && std::string(argv[1]) == "--console") {
         g_consoleMode = true;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         g_iniPath = argv[2];
         g_logDir = argv[3];
         g_log.init(g_logDir);
@@ -1186,6 +1218,8 @@ int main(int argc, char* argv[]) {
     if (!StartServiceCtrlDispatcherW(table)) {
         DWORD e = GetLastError();
         g_consoleMode = true;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         g_log.warn("StartServiceCtrlDispatcher failed (%lu). Running as console fallback.", e);
         g_stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         int rc = runWorker(g_iniPath, g_logDir);
