@@ -112,6 +112,7 @@ public:
         if (dir_.empty()) return false;
         CreateDirectoryA(dir_.c_str(), nullptr);
         filePath_ = dir_ + "\\mss_semd_checking.log";
+        ensureUtf8Bom();
         return true;
     }
 
@@ -129,6 +130,27 @@ private:
     std::mutex mu_;
     std::string dir_;
     std::string filePath_;
+
+    void ensureUtf8Bom() {
+        FILE* f = nullptr;
+        fopen_s(&f, filePath_.c_str(), "rb");
+        bool needBom = false;
+        if (!f) {
+            needBom = true;
+        } else {
+            fseek(f, 0, SEEK_END);
+            needBom = (ftell(f) == 0);
+            fclose(f);
+        }
+        if (needBom) {
+            fopen_s(&f, filePath_.c_str(), "ab");
+            if (f) {
+                const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+                fwrite(bom, 1, sizeof(bom), f);
+                fclose(f);
+            }
+        }
+    }
 
     static std::string nowStr() {
         SYSTEMTIME st; GetLocalTime(&st);
@@ -153,8 +175,16 @@ private:
             fclose(f);
         }
         if (g_consoleMode.load()) {
-            std::fwrite(line.data(), 1, line.size(), stdout);
-            std::fflush(stdout);
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD mode = 0;
+            if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode)) {
+                std::wstring wline = utf8ToWide(line);
+                DWORD written = 0;
+                WriteConsoleW(hOut, wline.c_str(), (DWORD)wline.size(), &written, nullptr);
+            } else {
+                std::fwrite(line.data(), 1, line.size(), stdout);
+                std::fflush(stdout);
+            }
         }
     }
 };
@@ -713,17 +743,43 @@ static std::string makeEventsRequestBody(const Config& cfg,
     return ss.str();
 }
 
-static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
+static std::vector<std::string> dbGetOpenIdDocumentMis(SqlDb& db, int topN) {
     std::vector<std::string> ids;
     std::ostringstream q;
-    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
-      << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
-      << " WHERE NETRIKA_STATUS = 3"
-      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
-      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
+    q
+      << ";WITH stage_mot AS ("
+      << " SELECT"
+      << " LTRIM(RTRIM(s.idDocumentMis)) AS idDocumentMis,"
+      << " s.modifiedDate,"
+      << " s.STAGE_ID,"
+      << " CASE"
+      << " WHEN s.idDocumentMis IS NULL THEN NULL"
+      << " WHEN CHARINDEX('_', REVERSE(s.idDocumentMis)) = 0 THEN NULL"
+      << " WHEN ISNUMERIC(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1)) = 1"
+      << " THEN CAST(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1) AS bigint)"
+      << " ELSE NULL"
+      << " END AS MOTCONSU_ID_EXTRACTED"
+      << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s WITH (NOLOCK)"
+      << " WHERE ISNULL(LTRIM(RTRIM(s.idDocumentMis)), '') <> ''"
+      << " ), latest_stage AS ("
+      << " SELECT"
+      << " sm.MOTCONSU_ID_EXTRACTED,"
+      << " sm.idDocumentMis,"
+      << " ROW_NUMBER() OVER (PARTITION BY sm.MOTCONSU_ID_EXTRACTED"
+      << " ORDER BY sm.modifiedDate DESC, sm.STAGE_ID DESC) AS rn"
+      << " FROM stage_mot sm"
+      << " WHERE sm.MOTCONSU_ID_EXTRACTED IS NOT NULL"
+      << " )"
+      << " SELECT TOP (" << std::max(1, topN) << ") ls.idDocumentMis"
+      << " FROM dbo.MSS_SEMD_DOC d WITH (NOLOCK)"
+      << " INNER JOIN latest_stage ls"
+      << " ON ls.MOTCONSU_ID_EXTRACTED = d.MOTCONSU_ID"
+      << " AND ls.rn = 1"
+      << " WHERE (d.NETRIKA_STATUS IS NULL OR d.NETRIKA_STATUS <> 4)"
+      << " ORDER BY ls.idDocumentMis;";
     std::string err;
     if (!db.queryStringColumn(q.str(), ids, err)) {
-        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
+        g_log.error("Failed to get open (status IS NULL OR <> 4) idDocumentMis list from stage mapping: %s", err.c_str());
         ids.clear();
     }
     return ids;
@@ -959,6 +1015,7 @@ static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
         << " s.MATCH_METHOD = 'MOTCONSU_ID'"
         << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
         << " INNER JOIN dbo.MSS_SEMD_DOC d ON d.MOTCONSU_ID = s.MOTCONSU_ID_EXTRACTED"
+        << " AND (d.NETRIKA_STATUS IS NULL OR d.NETRIKA_STATUS <> 4)"
         << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
         << " ;WITH latest_stage AS ("
         << " SELECT s.*, ROW_NUMBER() OVER ("
@@ -1024,11 +1081,11 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
         "EventLog daily"
     );
 
-    std::vector<std::string> status3Ids = dbGetStatus3IdDocumentMis(db, cfg.top_n);
-    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS=3", status3Ids.size());
+    std::vector<std::string> openIds = dbGetOpenIdDocumentMis(db, cfg.top_n);
+    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS IS NULL OR <> 4", openIds.size());
 
     size_t retryRows = 0;
-    for (const auto& idDocumentMis : status3Ids) {
+    for (const auto& idDocumentMis : openIds) {
         retryRows += fetchEventsToStage(
             db,
             cfg,
@@ -1045,13 +1102,13 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
                     idDocumentMis
                 );
             },
-            "EventLog retry status=3"
+            "EventLog retry open-status"
         );
     }
 
     size_t totalRows = dailyRows + retryRows;
     if (totalRows == 0) {
-        g_log.info("EventLog returned 0 rows (daily + status=3 retry).");
+        g_log.info("EventLog returned 0 rows (daily + open-status retry).");
         return;
     }
 
@@ -1158,6 +1215,8 @@ int main(int argc, char* argv[]) {
 
     if (argc >= 4 && std::string(argv[1]) == "--console") {
         g_consoleMode = true;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         g_iniPath = argv[2];
         g_logDir = argv[3];
         g_log.init(g_logDir);
@@ -1185,6 +1244,8 @@ int main(int argc, char* argv[]) {
     if (!StartServiceCtrlDispatcherW(table)) {
         DWORD e = GetLastError();
         g_consoleMode = true;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         g_log.warn("StartServiceCtrlDispatcher failed (%lu). Running as console fallback.", e);
         g_stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         int rc = runWorker(g_iniPath, g_logDir);
