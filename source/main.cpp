@@ -713,17 +713,17 @@ static std::string makeEventsRequestBody(const Config& cfg,
     return ss.str();
 }
 
-static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
+static std::vector<std::string> dbGetOpenIdDocumentMis(SqlDb& db, int topN) {
     std::vector<std::string> ids;
     std::ostringstream q;
     q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
       << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
-      << " WHERE NETRIKA_STATUS = 3"
+      << " WHERE (NETRIKA_STATUS IS NULL OR NETRIKA_STATUS <> 4)"
       << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
       << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
     std::string err;
     if (!db.queryStringColumn(q.str(), ids, err)) {
-        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
+        g_log.error("Failed to get open (status IS NULL OR <> 4) idDocumentMis list: %s", err.c_str());
         ids.clear();
     }
     return ids;
@@ -959,6 +959,7 @@ static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
         << " s.MATCH_METHOD = 'MOTCONSU_ID'"
         << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
         << " INNER JOIN dbo.MSS_SEMD_DOC d ON d.MOTCONSU_ID = s.MOTCONSU_ID_EXTRACTED"
+        << " AND (d.NETRIKA_STATUS IS NULL OR d.NETRIKA_STATUS <> 4)"
         << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
         << " ;WITH latest_stage AS ("
         << " SELECT s.*, ROW_NUMBER() OVER ("
@@ -1024,11 +1025,11 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
         "EventLog daily"
     );
 
-    std::vector<std::string> status3Ids = dbGetStatus3IdDocumentMis(db, cfg.top_n);
-    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS=3", status3Ids.size());
+    std::vector<std::string> openIds = dbGetOpenIdDocumentMis(db, cfg.top_n);
+    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS IS NULL OR <> 4", openIds.size());
 
     size_t retryRows = 0;
-    for (const auto& idDocumentMis : status3Ids) {
+    for (const auto& idDocumentMis : openIds) {
         retryRows += fetchEventsToStage(
             db,
             cfg,
@@ -1045,13 +1046,13 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
                     idDocumentMis
                 );
             },
-            "EventLog retry status=3"
+            "EventLog retry open-status"
         );
     }
 
     size_t totalRows = dailyRows + retryRows;
     if (totalRows == 0) {
-        g_log.info("EventLog returned 0 rows (daily + status=3 retry).");
+        g_log.info("EventLog returned 0 rows (daily + open-status retry).");
         return;
     }
 
