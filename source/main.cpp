@@ -93,6 +93,15 @@ static std::atomic<bool> g_consoleMode{false};
 static std::string g_iniPath;
 static std::string g_logDir;
 
+static std::wstring utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring ws(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &ws[0], n);
+    return ws;
+}
+
 // ------------------------------------------------------------
 // Logger
 // ------------------------------------------------------------
@@ -255,7 +264,8 @@ public:
             if (err) *err = "SQLAllocHandle STMT failed";
             return false;
         }
-        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        std::wstring wsql = utf8ToWide(sql);
+        SQLRETURN rc = SQLExecDirectW(stmt, (SQLWCHAR*)wsql.c_str(), SQL_NTS);
         bool ok = (rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO);
         if (!ok && err) *err = collectDiag(SQL_HANDLE_STMT, stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -268,7 +278,8 @@ public:
             err = "SQLAllocHandle STMT failed";
             return false;
         }
-        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        std::wstring wsql = utf8ToWide(sql);
+        SQLRETURN rc = SQLExecDirectW(stmt, (SQLWCHAR*)wsql.c_str(), SQL_NTS);
         if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
             err = collectDiag(SQL_HANDLE_STMT, stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -299,7 +310,8 @@ public:
             err = "SQLAllocHandle STMT failed";
             return false;
         }
-        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        std::wstring wsql = utf8ToWide(sql);
+        SQLRETURN rc = SQLExecDirectW(stmt, (SQLWCHAR*)wsql.c_str(), SQL_NTS);
         if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
             err = collectDiag(SQL_HANDLE_STMT, stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -537,11 +549,7 @@ static bool checkLicense(SqlDb& db, const Config& cfg) {
 // HTTP helpers
 // ------------------------------------------------------------
 static std::wstring toWide(const std::string& s) {
-    if (s.empty()) return L"";
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    std::wstring ws(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &ws[0], n);
-    return ws;
+    return utf8ToWide(s);
 }
 
 static bool splitUrl(const std::string& url, std::wstring& host, INTERNET_PORT& port, std::wstring& path, bool& https) {
