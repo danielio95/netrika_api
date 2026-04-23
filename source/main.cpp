@@ -920,22 +920,47 @@ static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const jso
             dateVal.c_str(),
             modifiedDateVal.c_str());
         g_log.error("Stage INSERT SQL: %s", q.str().c_str());
+        return;
     }
+
+    g_log.info(
+        "NETRIKA extra fields logged only (not written to MSS_SEMD_DOC): idDocumentMis=%s idSource=%s idFedRequest=%s remdRegNumber=%s goalText=%s sourceTypeName=%s emdTypeId=%s iemkTypeId=%s organization=%s department=%s modifiedDate=%s statusText=%s",
+        jsonGetStr(e, "idDocumentMis").c_str(),
+        jsonGetStr(e, "idSource").c_str(),
+        jsonGetStr(e, "idFedRequest").c_str(),
+        jsonGetStr(e, "remdRegNumber").c_str(),
+        jsonGetStr(e, "goalText").c_str(),
+        jsonGetStr(e, "sourceTypeName").c_str(),
+        jsonGetIntSql(e, "emdTypeId").c_str(),
+        jsonGetIntSql(e, "iemkTypeId").c_str(),
+        jsonGetStr(e, "organization").c_str(),
+        jsonGetStr(e, "department").c_str(),
+        rawModifiedDate.c_str(),
+        jsonGetStr(e, "statusText").c_str()
+    );
 }
 
-static void dbApplyStage(SqlDb& db, const std::string& loadGuid) {
-    std::ostringstream q;
-    q << "EXEC dbo.mss_apply_netrika_statuses @LoadGuid = '" << sqlEscape(loadGuid) << "';";
-    std::string err;
-    if (!db.exec(q.str(), &err)) {
-        g_log.error("Apply stage failed: %s", err.c_str());
-    }
-}
-
-static void dbApplyNon4Statuses(SqlDb& db, const std::string& loadGuid) {
+static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
     std::ostringstream q;
     q
-        << ";WITH latest_stage AS ("
+        << "UPDATE s"
+        << " SET s.MOTCONSU_ID_EXTRACTED ="
+        << " CASE"
+        << " WHEN s.idDocumentMis IS NULL THEN NULL"
+        << " WHEN CHARINDEX('_', REVERSE(s.idDocumentMis)) = 0 THEN NULL"
+        << " WHEN ISNUMERIC(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1)) = 1"
+        << " THEN CAST(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1) AS bigint)"
+        << " ELSE NULL"
+        << " END"
+        << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
+        << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
+        << " UPDATE s"
+        << " SET s.MATCHED_MSS_SEMD_DOC_ID = d.MSS_SEMD_DOC_ID,"
+        << " s.MATCH_METHOD = 'MOTCONSU_ID'"
+        << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
+        << " INNER JOIN dbo.MSS_SEMD_DOC d ON d.MOTCONSU_ID = s.MOTCONSU_ID_EXTRACTED"
+        << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
+        << " ;WITH latest_stage AS ("
         << " SELECT s.*, ROW_NUMBER() OVER ("
         << " PARTITION BY s.MATCHED_MSS_SEMD_DOC_ID"
         << " ORDER BY s.modifiedDate DESC, s.[date] DESC, s.STAGE_ID DESC"
@@ -944,26 +969,11 @@ static void dbApplyNon4Statuses(SqlDb& db, const std::string& loadGuid) {
         << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "'"
         << " AND s.MATCHED_MSS_SEMD_DOC_ID IS NOT NULL"
         << " AND s.[status] IS NOT NULL"
-        << " AND s.[status] <> 4"
         << " )"
         << " UPDATE d SET"
         << " d.NETRIKA_STATUS = s.[status],"
-        << " d.NETRIKA_STATUS_TEXT = LEFT(ISNULL(s.statusText, ''), 255),"
         << " d.NETRIKA_MESSAGE = LEFT(ISNULL(s.[message], ''), 4000),"
-        << " d.NETRIKA_MODIFIED_DATE = s.modifiedDate,"
-        << " d.NETRIKA_EVENT_DATE = s.[date],"
-        << " d.NETRIKA_IDDOCUMENTMIS = LEFT(ISNULL(s.idDocumentMis, ''), 100),"
-        << " d.NETRIKA_IDSOURCE = LEFT(ISNULL(s.idSource, ''), 100),"
-        << " d.NETRIKA_IDFEDREQUEST = LEFT(ISNULL(s.idFedRequest, ''), 100),"
-        << " d.NETRIKA_REMD_REG_NUMBER = LEFT(ISNULL(s.remdRegNumber, ''), 100),"
-        << " d.NETRIKA_GOAL_TEXT = LEFT(ISNULL(s.goalText, ''), 255),"
-        << " d.NETRIKA_SOURCE_TYPE_NAME = LEFT(ISNULL(s.sourceTypeName, ''), 100),"
-        << " d.NETRIKA_EMD_TYPE_ID = s.emdTypeId,"
-        << " d.NETRIKA_IEMK_TYPE_ID = s.iemkTypeId,"
-        << " d.NETRIKA_ORGANIZATION = LEFT(ISNULL(s.organization, ''), 255),"
-        << " d.NETRIKA_DEPARTMENT = LEFT(ISNULL(s.department, ''), 255),"
-        << " d.NETRIKA_CHECK_DATE = GETDATE(),"
-        << " d.NETRIKA_MATCH_METHOD = ISNULL(s.MATCH_METHOD, 'MOTCONSU_ID')"
+        << " d.NETRIKA_EVENT_DATE = s.[date]"
         << " FROM dbo.MSS_SEMD_DOC d"
         << " INNER JOIN latest_stage s"
         << " ON d.MSS_SEMD_DOC_ID = s.MATCHED_MSS_SEMD_DOC_ID"
@@ -971,9 +981,12 @@ static void dbApplyNon4Statuses(SqlDb& db, const std::string& loadGuid) {
 
     std::string err;
     if (!db.exec(q.str(), &err)) {
-        g_log.error("Apply non-4 statuses failed: %s", err.c_str());
+        g_log.error("Apply NETRIKA statuses failed: %s", err.c_str());
     } else {
-        g_log.info("Applied non-4 statuses for LOAD_GUID=%s", loadGuid.c_str());
+        g_log.info(
+            "Applied NETRIKA statuses to MSS_SEMD_DOC fields only: NETRIKA_STATUS, NETRIKA_MESSAGE, NETRIKA_EVENT_DATE. LOAD_GUID=%s",
+            loadGuid.c_str()
+        );
     }
 }
 
@@ -1043,8 +1056,7 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
     }
 
     g_log.info("Applying EventLog statuses for LOAD_GUID=%s totalRows=%zu", loadGuid.c_str(), totalRows);
-    dbApplyStage(db, loadGuid);
-    dbApplyNon4Statuses(db, loadGuid);
+    dbApplyStatuses(db, loadGuid);
     g_log.info("Applied EventLog statuses for LOAD_GUID=%s totalRows=%zu", loadGuid.c_str(), totalRows);
 }
 
