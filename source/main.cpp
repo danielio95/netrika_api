@@ -102,6 +102,37 @@ static std::wstring utf8ToWide(const std::string& s) {
     return ws;
 }
 
+static std::string wideToUtf8(const std::wstring& ws) {
+    if (ws.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return "";
+    std::string out(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), (int)ws.size(), &out[0], n, nullptr, nullptr);
+    return out;
+}
+
+static std::string tryFixMojibakeUtf8(const std::string& s) {
+    if (s.empty()) return s;
+    if (s.find("Р") == std::string::npos && s.find("С") == std::string::npos) {
+        return s;
+    }
+
+    std::wstring w = utf8ToWide(s);
+    if (w.empty()) return s;
+
+    int cpLen = WideCharToMultiByte(1251, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (cpLen <= 0) return s;
+    std::string cp1251(cpLen, '\0');
+    WideCharToMultiByte(1251, 0, w.c_str(), (int)w.size(), &cp1251[0], cpLen, nullptr, nullptr);
+
+    int utf16Len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, cp1251.c_str(), (int)cp1251.size(), nullptr, 0);
+    if (utf16Len <= 0) return s;
+    std::wstring fixedW(utf16Len, L'\0');
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, cp1251.c_str(), (int)cp1251.size(), &fixedW[0], utf16Len);
+    std::string fixed = wideToUtf8(fixedW);
+    return fixed.empty() ? s : fixed;
+}
+
 // ------------------------------------------------------------
 // Logger
 // ------------------------------------------------------------
@@ -112,6 +143,7 @@ public:
         if (dir_.empty()) return false;
         CreateDirectoryA(dir_.c_str(), nullptr);
         filePath_ = dir_ + "\\mss_semd_checking.log";
+        ensureUtf8Bom();
         return true;
     }
 
@@ -129,6 +161,27 @@ private:
     std::mutex mu_;
     std::string dir_;
     std::string filePath_;
+
+    void ensureUtf8Bom() {
+        FILE* f = nullptr;
+        fopen_s(&f, filePath_.c_str(), "rb");
+        bool needBom = false;
+        if (!f) {
+            needBom = true;
+        } else {
+            fseek(f, 0, SEEK_END);
+            needBom = (ftell(f) == 0);
+            fclose(f);
+        }
+        if (needBom) {
+            fopen_s(&f, filePath_.c_str(), "ab");
+            if (f) {
+                const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+                fwrite(bom, 1, sizeof(bom), f);
+                fclose(f);
+            }
+        }
+    }
 
     static std::string nowStr() {
         SYSTEMTIME st; GetLocalTime(&st);
@@ -153,8 +206,16 @@ private:
             fclose(f);
         }
         if (g_consoleMode.load()) {
-            std::fwrite(line.data(), 1, line.size(), stdout);
-            std::fflush(stdout);
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD mode = 0;
+            if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode)) {
+                std::wstring wline = utf8ToWide(line);
+                DWORD written = 0;
+                WriteConsoleW(hOut, wline.c_str(), (DWORD)wline.size(), &written, nullptr);
+            } else {
+                std::fwrite(line.data(), 1, line.size(), stdout);
+                std::fflush(stdout);
+            }
         }
     }
 };
@@ -713,20 +774,18 @@ static std::string makeEventsRequestBody(const Config& cfg,
     return ss.str();
 }
 
-static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
-    std::vector<std::string> ids;
+static int dbGetOpenDocsCount(SqlDb& db) {
+    std::vector<std::string> vals;
     std::ostringstream q;
-    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
+    q << "SELECT CAST(COUNT(1) AS varchar(32))"
       << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
-      << " WHERE NETRIKA_STATUS = 3"
-      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
-      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
+      << " WHERE (NETRIKA_STATUS IS NULL OR NETRIKA_STATUS <> 4);";
     std::string err;
-    if (!db.queryStringColumn(q.str(), ids, err)) {
-        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
-        ids.clear();
+    if (!db.queryStringColumn(q.str(), vals, err) || vals.empty()) {
+        g_log.error("Failed to get open docs count (NETRIKA_STATUS IS NULL OR <> 4): %s", err.c_str());
+        return -1;
     }
-    return ids;
+    return atoi(vals[0].c_str());
 }
 
 static std::string jsonGetStr(const json& e, const char* key);
@@ -819,7 +878,8 @@ static std::string newGuidString() {
 }
 
 static std::string jsonGetStr(const json& e, const char* key) {
-    return e.contains(key) && !e[key].is_null() ? e[key].get<std::string>() : "";
+    if (!e.contains(key) || e[key].is_null()) return "";
+    return tryFixMojibakeUtf8(e[key].get<std::string>());
 }
 
 static std::string jsonGetIntSql(const json& e, const char* key) {
@@ -959,6 +1019,7 @@ static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
         << " s.MATCH_METHOD = 'MOTCONSU_ID'"
         << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
         << " INNER JOIN dbo.MSS_SEMD_DOC d ON d.MOTCONSU_ID = s.MOTCONSU_ID_EXTRACTED"
+        << " AND (d.NETRIKA_STATUS IS NULL OR d.NETRIKA_STATUS <> 4)"
         << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
         << " ;WITH latest_stage AS ("
         << " SELECT s.*, ROW_NUMBER() OVER ("
@@ -1024,34 +1085,17 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
         "EventLog daily"
     );
 
-    std::vector<std::string> status3Ids = dbGetStatus3IdDocumentMis(db, cfg.top_n);
-    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS=3", status3Ids.size());
-
-    size_t retryRows = 0;
-    for (const auto& idDocumentMis : status3Ids) {
-        retryRows += fetchEventsToStage(
-            db,
-            cfg,
-            loadGuid,
-            [&](int startRow, int endRow) {
-                return makeEventsRequestBody(
-                    cfg,
-                    startRow,
-                    endRow,
-                    "",
-                    "",
-                    "",
-                    "",
-                    idDocumentMis
-                );
-            },
-            "EventLog retry status=3"
+    int openDocsCount = dbGetOpenDocsCount(db);
+    if (openDocsCount >= 0) {
+        g_log.info(
+            "Open docs by NETRIKA_STATUS (NULL or <>4): %d. Per-doc retries are disabled to avoid API rate-limit storms.",
+            openDocsCount
         );
     }
 
-    size_t totalRows = dailyRows + retryRows;
+    size_t totalRows = dailyRows;
     if (totalRows == 0) {
-        g_log.info("EventLog returned 0 rows (daily + status=3 retry).");
+        g_log.info("EventLog returned 0 rows (daily fetch).");
         return;
     }
 
@@ -1158,6 +1202,8 @@ int main(int argc, char* argv[]) {
 
     if (argc >= 4 && std::string(argv[1]) == "--console") {
         g_consoleMode = true;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         g_iniPath = argv[2];
         g_logDir = argv[3];
         g_log.init(g_logDir);
@@ -1185,6 +1231,8 @@ int main(int argc, char* argv[]) {
     if (!StartServiceCtrlDispatcherW(table)) {
         DWORD e = GetLastError();
         g_consoleMode = true;
+        SetConsoleOutputCP(CP_UTF8);
+        SetConsoleCP(CP_UTF8);
         g_log.warn("StartServiceCtrlDispatcher failed (%lu). Running as console fallback.", e);
         g_stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         int rc = runWorker(g_iniPath, g_logDir);
