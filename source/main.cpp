@@ -746,40 +746,14 @@ static std::string makeEventsRequestBody(const Config& cfg,
 static std::vector<std::string> dbGetOpenIdDocumentMis(SqlDb& db, int topN) {
     std::vector<std::string> ids;
     std::ostringstream q;
-    q
-      << ";WITH stage_mot AS ("
-      << " SELECT"
-      << " LTRIM(RTRIM(s.idDocumentMis)) AS idDocumentMis,"
-      << " s.modifiedDate,"
-      << " s.STAGE_ID,"
-      << " CASE"
-      << " WHEN s.idDocumentMis IS NULL THEN NULL"
-      << " WHEN CHARINDEX('_', REVERSE(s.idDocumentMis)) = 0 THEN NULL"
-      << " WHEN ISNUMERIC(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1)) = 1"
-      << " THEN CAST(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1) AS bigint)"
-      << " ELSE NULL"
-      << " END AS MOTCONSU_ID_EXTRACTED"
-      << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s WITH (NOLOCK)"
-      << " WHERE ISNULL(LTRIM(RTRIM(s.idDocumentMis)), '') <> ''"
-      << " ), latest_stage AS ("
-      << " SELECT"
-      << " sm.MOTCONSU_ID_EXTRACTED,"
-      << " sm.idDocumentMis,"
-      << " ROW_NUMBER() OVER (PARTITION BY sm.MOTCONSU_ID_EXTRACTED"
-      << " ORDER BY sm.modifiedDate DESC, sm.STAGE_ID DESC) AS rn"
-      << " FROM stage_mot sm"
-      << " WHERE sm.MOTCONSU_ID_EXTRACTED IS NOT NULL"
-      << " )"
-      << " SELECT TOP (" << std::max(1, topN) << ") ls.idDocumentMis"
-      << " FROM dbo.MSS_SEMD_DOC d WITH (NOLOCK)"
-      << " INNER JOIN latest_stage ls"
-      << " ON ls.MOTCONSU_ID_EXTRACTED = d.MOTCONSU_ID"
-      << " AND ls.rn = 1"
-      << " WHERE (d.NETRIKA_STATUS IS NULL OR d.NETRIKA_STATUS <> 4)"
-      << " ORDER BY ls.idDocumentMis;";
+    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
+      << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
+      << " WHERE (NETRIKA_STATUS IS NULL OR NETRIKA_STATUS <> 4)"
+      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
+      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
     std::string err;
     if (!db.queryStringColumn(q.str(), ids, err)) {
-        g_log.error("Failed to get open (status IS NULL OR <> 4) idDocumentMis list from stage mapping: %s", err.c_str());
+        g_log.error("Failed to get open (status IS NULL OR <> 4) idDocumentMis list: %s", err.c_str());
         ids.clear();
     }
     return ids;
