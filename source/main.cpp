@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -287,6 +288,43 @@ public:
             return false;
         }
         val = (ind == SQL_NULL_DATA) ? "" : std::string(buf);
+        SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+        return true;
+    }
+
+    bool queryStringColumn(const std::string& sql, std::vector<std::string>& values, std::string& err) {
+        values.clear();
+        SQLHSTMT stmt = nullptr;
+        if (SQLAllocHandle(SQL_HANDLE_STMT, hdbc_, &stmt) != SQL_SUCCESS) {
+            err = "SQLAllocHandle STMT failed";
+            return false;
+        }
+        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+            err = collectDiag(SQL_HANDLE_STMT, stmt);
+            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+            return false;
+        }
+
+        for (;;) {
+            rc = SQLFetch(stmt);
+            if (rc == SQL_NO_DATA) break;
+            if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+                err = collectDiag(SQL_HANDLE_STMT, stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                return false;
+            }
+
+            char buf[8192]{}; SQLLEN ind = 0;
+            rc = SQLGetData(stmt, 1, SQL_C_CHAR, buf, sizeof(buf), &ind);
+            if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+                err = collectDiag(SQL_HANDLE_STMT, stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                return false;
+            }
+            if (ind != SQL_NULL_DATA) values.emplace_back(buf);
+        }
+
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
         return true;
     }
@@ -632,7 +670,14 @@ static std::string todayYmd() {
     return d;
 }
 
-static std::string makeEventsRequestBody(const Config& cfg, int startRow, int endRow) {
+static std::string makeEventsRequestBody(const Config& cfg,
+                                         int startRow,
+                                         int endRow,
+                                         const std::string& dateBegin,
+                                         const std::string& dateEnd,
+                                         const std::string& modifiedDateBegin,
+                                         const std::string& modifiedDateEnd,
+                                         const std::string& idDocumentMis = "") {
     std::ostringstream ss;
     ss << "{";
 
@@ -645,10 +690,11 @@ static std::string makeEventsRequestBody(const Config& cfg, int startRow, int en
         needComma = true;
     };
 
-    addStrField("dateBegin", cfg.date_begin);
-    addStrField("dateEnd", cfg.date_end);
-    addStrField("modifiedDateBegin", cfg.modified_date_begin);
-    addStrField("modifiedDateEnd", cfg.modified_date_end);
+    addStrField("dateBegin", dateBegin);
+    addStrField("dateEnd", dateEnd);
+    addStrField("modifiedDateBegin", modifiedDateBegin);
+    addStrField("modifiedDateEnd", modifiedDateEnd);
+    addStrField("idDocumentMis", idDocumentMis);
 
     if (needComma) ss << ",";
     ss << "\"systemOid\":[\"" << cfg.system_oid << "\"]";
@@ -657,6 +703,99 @@ static std::string makeEventsRequestBody(const Config& cfg, int startRow, int en
     ss << "}";
 
     return ss.str();
+}
+
+static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
+    std::vector<std::string> ids;
+    std::ostringstream q;
+    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
+      << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
+      << " WHERE NETRIKA_STATUS = 3"
+      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
+      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
+    std::string err;
+    if (!db.queryStringColumn(q.str(), ids, err)) {
+        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
+        ids.clear();
+    }
+    return ids;
+}
+
+static std::string jsonGetStr(const json& e, const char* key);
+static std::string jsonGetIntSql(const json& e, const char* key);
+static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const json& e);
+
+static size_t fetchEventsToStage(SqlDb& db,
+                                 const Config& cfg,
+                                 const std::string& loadGuid,
+                                 const std::function<std::string(int, int)>& buildRequestBody,
+                                 const char* contextLogPrefix) {
+    const int pageSize = 100;
+    int startRow = 0;
+    size_t totalRows = 0;
+
+    for (;;) {
+        int endRow = startRow + pageSize;
+        std::string body = buildRequestBody(startRow, endRow);
+
+        std::string raw;
+        json parsed;
+        int httpStatus = 0;
+
+        bool ok = http_post_json(
+            cfg.base_url + cfg.events_endpoint,
+            cfg.token,
+            body,
+            raw,
+            parsed,
+            httpStatus,
+            cfg.http_timeout_ms
+        );
+
+        if (!ok) {
+            g_log.warn(
+                "%s request failed on page startRow=%d endRow=%d: HTTP=%d resp=%s",
+                contextLogPrefix, startRow, endRow, httpStatus, raw.c_str()
+            );
+            break;
+        }
+
+        if (!parsed.is_array()) {
+            g_log.error(
+                "%s response is not JSON array on page startRow=%d endRow=%d. Raw=%s",
+                contextLogPrefix, startRow, endRow, raw.c_str()
+            );
+            break;
+        }
+
+        size_t pageCount = parsed.size();
+        g_log.info(
+            "%s page received: startRow=%d endRow=%d rows=%zu LOAD_GUID=%s",
+            contextLogPrefix, startRow, endRow, pageCount, loadGuid.c_str()
+        );
+
+        if (pageCount == 0) break;
+
+        for (const auto& e : parsed) {
+            dbInsertStageEvent(db, loadGuid, e);
+            ++totalRows;
+            if (totalRows <= 3) {
+                g_log.info(
+                    "%s sample #%zu: idDocumentMis=%s status=%s statusText=%s",
+                    contextLogPrefix,
+                    totalRows,
+                    jsonGetStr(e, "idDocumentMis").c_str(),
+                    jsonGetIntSql(e, "status").c_str(),
+                    jsonGetStr(e, "statusText").c_str()
+                );
+            }
+        }
+
+        if (pageCount < (size_t)pageSize) break;
+        startRow += pageSize;
+    }
+
+    return totalRows;
 }
 
 static std::string newGuidString() {
@@ -845,91 +984,53 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
         modifiedDateEnd.c_str()
     );
 
-    const int pageSize = 100;   // EventLog page limit
-    int startRow = 0;
-    size_t totalRows = 0;
-    size_t totalInserted = 0;
     std::string loadGuid = newGuidString();
-
-    for (;;) {
-        int endRow = startRow + pageSize;
-        std::string body = makeEventsRequestBody(cfg, startRow, endRow);
-
-        std::string raw;
-        json parsed;
-        int httpStatus = 0;
-
-        bool ok = http_post_json(
-            cfg.base_url + cfg.events_endpoint,
-            cfg.token,
-            body,
-            raw,
-            parsed,
-            httpStatus,
-            cfg.http_timeout_ms
-        );
-
-        if (!ok) {
-            g_log.warn(
-                "EventLog request failed on page startRow=%d endRow=%d: HTTP=%d resp=%s",
-                startRow, endRow, httpStatus, raw.c_str()
+    size_t dailyRows = fetchEventsToStage(
+        db,
+        cfg,
+        loadGuid,
+        [&](int startRow, int endRow) {
+            return makeEventsRequestBody(
+                cfg,
+                startRow,
+                endRow,
+                dateBegin,
+                dateEnd,
+                modifiedDateBegin,
+                modifiedDateEnd
             );
-            break;
-        }
+        },
+        "EventLog daily"
+    );
 
-        if (!parsed.is_array()) {
-            g_log.error(
-                "EventLog response is not JSON array on page startRow=%d endRow=%d. Raw=%s",
-                startRow, endRow, raw.c_str()
-            );
-            break;
-        }
+    std::vector<std::string> status3Ids = dbGetStatus3IdDocumentMis(db, cfg.top_n);
+    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS=3", status3Ids.size());
 
-        size_t pageCount = parsed.size();
-
-        g_log.info(
-            "EventLog page received: startRow=%d endRow=%d rows=%zu LOAD_GUID=%s",
-            startRow, endRow, pageCount, loadGuid.c_str()
-        );
-
-        if (pageCount == 0) {
-            break;
-        }
-
-        size_t pageInserted = 0;
-
-        for (const auto& e : parsed) {
-            dbInsertStageEvent(db, loadGuid, e);
-            ++totalRows;
-            ++pageInserted;
-            ++totalInserted;
-
-            if (totalRows <= 5) {
-                g_log.info(
-                    "Stage sample #%zu: idDocumentMis=%s status=%s statusText=%s",
-                    totalRows,
-                    jsonGetStr(e, "idDocumentMis").c_str(),
-                    jsonGetIntSql(e, "status").c_str(),
-                    jsonGetStr(e, "statusText").c_str()
+    size_t retryRows = 0;
+    for (const auto& idDocumentMis : status3Ids) {
+        retryRows += fetchEventsToStage(
+            db,
+            cfg,
+            loadGuid,
+            [&](int startRow, int endRow) {
+                return makeEventsRequestBody(
+                    cfg,
+                    startRow,
+                    endRow,
+                    "",
+                    "",
+                    "",
+                    "",
+                    idDocumentMis
                 );
-            }
-        }
-
-        g_log.info(
-            "EventLog page processed: startRow=%d endRow=%d pageRows=%zu totalRows=%zu",
-            startRow, endRow, pageInserted, totalRows
+            },
+            "EventLog retry status=3"
         );
-
-        // Если пришло меньше pageSize — это последняя страница
-        if (pageCount < (size_t)pageSize) {
-            break;
-        }
-
-        startRow += pageSize;
     }
 
+    size_t totalRows = dailyRows + retryRows;
     if (totalRows == 0) {
-        g_log.info("EventLog returned 0 rows for requested period.");
+        g_log.info("EventLog returned 0 rows (daily + status=3 retry).");
         return;
     }
 
