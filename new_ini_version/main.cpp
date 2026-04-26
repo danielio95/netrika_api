@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -26,7 +27,6 @@
 #include <thread>
 #include <vector>
 
-// Requires nlohmann/json single-header file near the project.
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -38,20 +38,60 @@ using json = nlohmann::json;
 #pragma comment(lib, "ole32.lib")
 
 static const wchar_t* SERVICE_NAME_W = L"mss_semd_checking";
-static const char* LICENSE_HMAC_SECRET = "CHANGE_ME__LONG_RANDOM_SECRET__MSS_SEMD_CHECKING";
+static const char* LICENSE_HMAC_SECRET = "mss_semd_2026_super_secret_fixed_01";
 
+// ============================================================
+// SECURITY: Compile-Time String Obfuscation
+// This encrypts strings in the executable so they cannot be read.
+// ============================================================
+template <size_t N>
+struct ObfuscatedString {
+    char data[N];
+    constexpr ObfuscatedString(const char(&str)[N]) : data{0} {
+        // 0x5A is our secret XOR key. It scrambles the text.
+        for (size_t i = 0; i < N; ++i) {
+            data[i] = str[i] ^ 0x5A;
+        }
+    }
+    std::string decrypt() const {
+        std::string res(N - 1, '\0');
+        for (size_t i = 0; i < N - 1; ++i) {
+            res[i] = data[i] ^ 0x5A; // Unscramble back to normal text
+        }
+        return res;
+    }
+};
+#define OBFUSCATE(str) (ObfuscatedString<sizeof(str)>(str).decrypt())
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
 struct Config {
+    // Dynamic variables loaded from the .ini file
+    std::string server;
+    std::string database;
     std::string odbc_conn;
-    std::string base_url;
-    std::string token;
+
+    // Hardcoded and obfuscated API credentials
+    std::string base_url = OBFUSCATE("https://b2b.n3health.ru/n3h-eventlog-api");
+    std::string token = OBFUSCATE("N3 2719a600-fbee-ffd3-816c-ac854004ab88");
+    
+    // Other hardcoded parameters
     std::string events_endpoint = "/EventLog/GetEvents";
-    std::string system_oid;
+    std::string system_oid = "1.2.643.2.69.1.2.348";
     std::string program_name = "mss_semd_checking";
     std::string sql_login_name = "mss_semd_checking";
-    int poll_interval_seconds = 300;
+    
+    int poll_interval_seconds = 3600;
     int top_n = 500;
     int http_timeout_ms = 30000;
-    std::string log_dir;
+    
+    // Default paths and dates (adjust these to your preferences)
+    std::string log_dir = "C:\\mss\\logs"; 
+    std::string date_begin = "";
+    std::string date_end = "";
+    std::string modified_date_begin = "2026-03-25";
+    std::string modified_date_end = "2026-03-29";
 };
 
 struct EventRow {
@@ -88,6 +128,15 @@ static HANDLE g_stopEvent = nullptr;
 static std::atomic<bool> g_consoleMode{false};
 static std::string g_iniPath;
 static std::string g_logDir;
+
+static std::wstring utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring ws(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &ws[0], n);
+    return ws;
+}
 
 // ------------------------------------------------------------
 // Logger
@@ -164,24 +213,28 @@ static std::string iniGet(const std::string& path, const std::string& section, c
     return trim(buf);
 }
 
+
+// ============================================================
+// INI LOADER
+// ============================================================
 static bool loadConfig(const std::string& iniPath, Config& cfg, std::string& err) {
-    cfg.odbc_conn = iniGet(iniPath, "database", "odbc_conn", "");
-    if (cfg.odbc_conn.empty()) { err = "ini: [database].odbc_conn is empty"; return false; }
+    // 1. Read ONLY server and database from the INI file
+    cfg.server = iniGet(iniPath, "database", "server", "");
+    cfg.database = iniGet(iniPath, "database", "database", "");
 
-    cfg.base_url = iniGet(iniPath, "netrika", "base_url", "");
-    cfg.token = iniGet(iniPath, "netrika", "token", "");
-    cfg.events_endpoint = iniGet(iniPath, "netrika", "events_endpoint", cfg.events_endpoint);
-    cfg.system_oid = iniGet(iniPath, "netrika", "system_oid", "");
-    if (cfg.base_url.empty()) { err = "ini: [netrika].base_url is empty"; return false; }
-    if (cfg.token.empty()) { err = "ini: [netrika].token is empty"; return false; }
-    if (cfg.system_oid.empty()) { err = "ini: [netrika].system_oid is empty"; return false; }
+    if (cfg.server.empty()) { err = "ini: [database].server is empty"; return false; }
+    if (cfg.database.empty()) { err = "ini: [database].database is empty"; return false; }
 
-    cfg.program_name = iniGet(iniPath, "params", "program_name", cfg.program_name);
-    cfg.sql_login_name = iniGet(iniPath, "params", "sql_login_name", cfg.sql_login_name);
-    cfg.poll_interval_seconds = std::max(30, atoi(iniGet(iniPath, "params", "poll_interval_seconds", "300").c_str()));
-    cfg.top_n = std::max(1, atoi(iniGet(iniPath, "params", "top_n", "500").c_str()));
-    cfg.http_timeout_ms = std::max(1000, atoi(iniGet(iniPath, "params", "http_timeout_ms", "30000").c_str()));
-    cfg.log_dir = iniGet(iniPath, "logging", "log_dir", g_logDir);
+    // 2. Safely hardcode and decrypt the SQL credentials
+    // Replace "mss" and "sanitas10122010" if your target deployment uses different credentials
+    std::string uid = OBFUSCATE("mss");
+    std::string pwd = OBFUSCATE("sanitas10122010");
+
+    // 3. Construct the final ODBC string dynamically
+    cfg.odbc_conn = "Driver={ODBC Driver 17 for SQL Server};Server=" + cfg.server +
+                    ";Database=" + cfg.database +
+                    ";Uid=" + uid + ";Pwd=" + pwd + ";TrustServerCertificate=yes;";
+
     return true;
 }
 
@@ -247,7 +300,8 @@ public:
             if (err) *err = "SQLAllocHandle STMT failed";
             return false;
         }
-        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        std::wstring wsql = utf8ToWide(sql);
+        SQLRETURN rc = SQLExecDirectW(stmt, (SQLWCHAR*)wsql.c_str(), SQL_NTS);
         bool ok = (rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO);
         if (!ok && err) *err = collectDiag(SQL_HANDLE_STMT, stmt);
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -260,7 +314,8 @@ public:
             err = "SQLAllocHandle STMT failed";
             return false;
         }
-        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        std::wstring wsql = utf8ToWide(sql);
+        SQLRETURN rc = SQLExecDirectW(stmt, (SQLWCHAR*)wsql.c_str(), SQL_NTS);
         if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
             err = collectDiag(SQL_HANDLE_STMT, stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -284,47 +339,38 @@ public:
         return true;
     }
 
-    bool queryRows(const std::string& sql, int columnCount, std::vector<std::vector<std::string>>& rows, std::string& err) {
-        rows.clear();
-        if (columnCount <= 0) {
-            err = "columnCount must be > 0";
-            return false;
-        }
-
+    bool queryStringColumn(const std::string& sql, std::vector<std::string>& values, std::string& err) {
+        values.clear();
         SQLHSTMT stmt = nullptr;
         if (SQLAllocHandle(SQL_HANDLE_STMT, hdbc_, &stmt) != SQL_SUCCESS) {
             err = "SQLAllocHandle STMT failed";
             return false;
         }
-
-        SQLRETURN rc = SQLExecDirectA(stmt, (SQLCHAR*)sql.c_str(), SQL_NTS);
+        std::wstring wsql = utf8ToWide(sql);
+        SQLRETURN rc = SQLExecDirectW(stmt, (SQLWCHAR*)wsql.c_str(), SQL_NTS);
         if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
             err = collectDiag(SQL_HANDLE_STMT, stmt);
             SQLFreeHandle(SQL_HANDLE_STMT, stmt);
             return false;
         }
 
-        while ((rc = SQLFetch(stmt)) == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO) {
-            std::vector<std::string> row;
-            row.reserve((size_t)columnCount);
-            for (int col = 1; col <= columnCount; ++col) {
-                char buf[4096]{};
-                SQLLEN ind = 0;
-                SQLRETURN rd = SQLGetData(stmt, (SQLUSMALLINT)col, SQL_C_CHAR, buf, sizeof(buf), &ind);
-                if (!(rd == SQL_SUCCESS || rd == SQL_SUCCESS_WITH_INFO)) {
-                    err = collectDiag(SQL_HANDLE_STMT, stmt);
-                    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-                    return false;
-                }
-                row.emplace_back(ind == SQL_NULL_DATA ? "" : std::string(buf));
+        for (;;) {
+            rc = SQLFetch(stmt);
+            if (rc == SQL_NO_DATA) break;
+            if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+                err = collectDiag(SQL_HANDLE_STMT, stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                return false;
             }
-            rows.emplace_back(std::move(row));
-        }
 
-        if (rc != SQL_NO_DATA) {
-            err = collectDiag(SQL_HANDLE_STMT, stmt);
-            SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-            return false;
+            char buf[8192]{}; SQLLEN ind = 0;
+            rc = SQLGetData(stmt, 1, SQL_C_CHAR, buf, sizeof(buf), &ind);
+            if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+                err = collectDiag(SQL_HANDLE_STMT, stmt);
+                SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+                return false;
+            }
+            if (ind != SQL_NULL_DATA) values.emplace_back(buf);
         }
 
         SQLFreeHandle(SQL_HANDLE_STMT, stmt);
@@ -539,11 +585,7 @@ static bool checkLicense(SqlDb& db, const Config& cfg) {
 // HTTP helpers
 // ------------------------------------------------------------
 static std::wstring toWide(const std::string& s) {
-    if (s.empty()) return L"";
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
-    std::wstring ws(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &ws[0], n);
-    return ws;
+    return utf8ToWide(s);
 }
 
 static bool splitUrl(const std::string& url, std::wstring& host, INTERNET_PORT& port, std::wstring& path, bool& https) {
@@ -663,25 +705,141 @@ done:
 // ------------------------------------------------------------
 // EventLog request + DB load
 // ------------------------------------------------------------
+
 static std::string todayYmd() {
-    SYSTEMTIME st; GetLocalTime(&st);
-    char d[16]; sprintf_s(d, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char d[16];
+    sprintf_s(d, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
     return d;
 }
 
-static std::string makeTodayEventsRequestBody(const Config& cfg) {
-    std::string d = todayYmd();
+static std::string makeEventsRequestBody(const Config& cfg,
+                                         int startRow,
+                                         int endRow,
+                                         const std::string& dateBegin,
+                                         const std::string& dateEnd,
+                                         const std::string& modifiedDateBegin,
+                                         const std::string& modifiedDateEnd,
+                                         const std::string& idDocumentMis = "") {
     std::ostringstream ss;
-    ss << "{"
-       << "\"dateBegin\":\"" << d << "\"," 
-       << "\"dateEnd\":\"" << d << "\"," 
-       << "\"modifiedDateBegin\":\"" << d << "\"," 
-       << "\"modifiedDateEnd\":\"" << d << "\"," 
-       << "\"systemOid\":[\"" << cfg.system_oid << "\"],"
-       << "\"startRow\":0,"
-       << "\"endRow\":" << cfg.top_n
-       << "}";
+    ss << "{";
+
+    bool needComma = false;
+
+    auto addStrField = [&](const char* name, const std::string& value) {
+        if (value.empty()) return;
+        if (needComma) ss << ",";
+        ss << "\"" << name << "\":\"" << value << "\"";
+        needComma = true;
+    };
+
+    addStrField("dateBegin", dateBegin);
+    addStrField("dateEnd", dateEnd);
+    addStrField("modifiedDateBegin", modifiedDateBegin);
+    addStrField("modifiedDateEnd", modifiedDateEnd);
+    addStrField("idDocumentMis", idDocumentMis);
+
+    if (needComma) ss << ",";
+    ss << "\"systemOid\":[\"" << cfg.system_oid << "\"]";
+    ss << ",\"startRow\":" << startRow;
+    ss << ",\"endRow\":" << endRow;
+    ss << "}";
+
     return ss.str();
+}
+
+static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
+    std::vector<std::string> ids;
+    std::ostringstream q;
+    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
+      << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
+      << " WHERE NETRIKA_STATUS = 3"
+      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
+      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
+    std::string err;
+    if (!db.queryStringColumn(q.str(), ids, err)) {
+        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
+        ids.clear();
+    }
+    return ids;
+}
+
+static std::string jsonGetStr(const json& e, const char* key);
+static std::string jsonGetIntSql(const json& e, const char* key);
+static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const json& e);
+
+static size_t fetchEventsToStage(SqlDb& db,
+                                 const Config& cfg,
+                                 const std::string& loadGuid,
+                                 const std::function<std::string(int, int)>& buildRequestBody,
+                                 const char* contextLogPrefix) {
+    const int pageSize = 100;
+    int startRow = 0;
+    size_t totalRows = 0;
+
+    for (;;) {
+        int endRow = startRow + pageSize;
+        std::string body = buildRequestBody(startRow, endRow);
+
+        std::string raw;
+        json parsed;
+        int httpStatus = 0;
+
+        bool ok = http_post_json(
+            cfg.base_url + cfg.events_endpoint,
+            cfg.token,
+            body,
+            raw,
+            parsed,
+            httpStatus,
+            cfg.http_timeout_ms
+        );
+
+        if (!ok) {
+            g_log.warn(
+                "%s request failed on page startRow=%d endRow=%d: HTTP=%d resp=%s",
+                contextLogPrefix, startRow, endRow, httpStatus, raw.c_str()
+            );
+            break;
+        }
+
+        if (!parsed.is_array()) {
+            g_log.error(
+                "%s response is not JSON array on page startRow=%d endRow=%d. Raw=%s",
+                contextLogPrefix, startRow, endRow, raw.c_str()
+            );
+            break;
+        }
+
+        size_t pageCount = parsed.size();
+        g_log.info(
+            "%s page received: startRow=%d endRow=%d rows=%zu LOAD_GUID=%s",
+            contextLogPrefix, startRow, endRow, pageCount, loadGuid.c_str()
+        );
+
+        if (pageCount == 0) break;
+
+        for (const auto& e : parsed) {
+            dbInsertStageEvent(db, loadGuid, e);
+            ++totalRows;
+            if (totalRows <= 3) {
+                g_log.info(
+                    "%s sample #%zu: idDocumentMis=%s status=%s statusText=%s",
+                    contextLogPrefix,
+                    totalRows,
+                    jsonGetStr(e, "idDocumentMis").c_str(),
+                    jsonGetIntSql(e, "status").c_str(),
+                    jsonGetStr(e, "statusText").c_str()
+                );
+            }
+        }
+
+        if (pageCount < (size_t)pageSize) break;
+        startRow += pageSize;
+    }
+
+    return totalRows;
 }
 
 static std::string newGuidString() {
@@ -706,8 +864,57 @@ static std::string jsonGetIntSql(const json& e, const char* key) {
     catch (...) { return "NULL"; }
 }
 
+static std::string normalizeSqlDateTime(std::string s) {
+    s = trim(s);
+    if (s.empty()) return "";
+
+    if (!s.empty() && s.front() == '"') s.erase(0, 1);
+    if (!s.empty() && s.back() == '"') s.pop_back();
+
+    size_t tpos = s.find('T');
+    if (tpos != std::string::npos) s[tpos] = ' ';
+
+    if (!s.empty() && (s.back() == 'Z' || s.back() == 'z')) {
+        s.pop_back();
+    }
+
+    size_t plusPos = s.find('+', 10);
+    size_t minusPos = s.find('-', 10);
+    size_t tzPos = std::string::npos;
+
+    if (plusPos != std::string::npos) tzPos = plusPos;
+    if (minusPos != std::string::npos) {
+        if (tzPos == std::string::npos || minusPos < tzPos) tzPos = minusPos;
+    }
+    if (tzPos != std::string::npos) {
+        s = s.substr(0, tzPos);
+    }
+
+    size_t dotPos = s.find('.');
+    if (dotPos != std::string::npos) {
+        size_t fracStart = dotPos + 1;
+        size_t fracLen = 0;
+        while (fracStart + fracLen < s.size() && isdigit((unsigned char)s[fracStart + fracLen])) {
+            ++fracLen;
+        }
+
+        if (fracLen == 0) {
+            s = s.substr(0, dotPos);
+        } else if (fracLen > 3) {
+            s = s.substr(0, fracStart + 3);
+        }
+    }
+
+    return trim(s);
+}
+
 static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const json& e) {
     std::ostringstream q;
+    std::string rawDate = jsonGetStr(e, "date");
+    std::string rawModifiedDate = jsonGetStr(e, "modifiedDate");
+
+    std::string dateVal = normalizeSqlDateTime(rawDate);
+    std::string modifiedDateVal = normalizeSqlDateTime(rawModifiedDate);
     q << "INSERT INTO dbo.MSS_NETRIKA_EVENTLOG_STAGE ("
       << "LOAD_GUID,idLpu,name,systemName,systemOid,[date],modifiedDate,organization,department,"
       << "idCaseMis,idDocumentMis,emdType,emdTypeId,iemkTypeId,[status],[message],remdRegNumber,"
@@ -718,9 +925,8 @@ static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const jso
       << "'" << sqlEscape(jsonGetStr(e, "name")) << "',"
       << "'" << sqlEscape(jsonGetStr(e, "systemName")) << "',"
       << "'" << sqlEscape(jsonGetStr(e, "systemOid")) << "',"
-      << (jsonGetStr(e, "date").empty() ? "NULL" : "'" + sqlEscape(jsonGetStr(e, "date")) + "'") << ","
-      << (jsonGetStr(e, "modifiedDate").empty() ? "NULL" : "'" + sqlEscape(jsonGetStr(e, "modifiedDate")) + "'") << ","
-      << "'" << sqlEscape(jsonGetStr(e, "organization")) << "',"
+      << (dateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(dateVal) + "', 121)") << ","
+      << (modifiedDateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(modifiedDateVal) + "', 121)") << ","      << "'" << sqlEscape(jsonGetStr(e, "organization")) << "',"
       << "'" << sqlEscape(jsonGetStr(e, "department")) << "',"
       << "'" << sqlEscape(jsonGetStr(e, "idCaseMis")) << "',"
       << "'" << sqlEscape(jsonGetStr(e, "idDocumentMis")) << "',"
@@ -744,120 +950,150 @@ static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const jso
     std::string err;
     if (!db.exec(q.str(), &err)) {
         g_log.error("Stage INSERT failed: %s", err.c_str());
-    }
-}
-
-static void dbApplyStage(SqlDb& db, const std::string& loadGuid) {
-    std::ostringstream q;
-    q << "EXEC dbo.mss_apply_netrika_statuses @LoadGuid = '" << sqlEscape(loadGuid) << "';";
-    std::string err;
-    if (!db.exec(q.str(), &err)) {
-        g_log.error("Apply stage failed: %s", err.c_str());
-    }
-}
-
-static void logLeftoverNetrikaStatusesToStdout(SqlDb& db, const std::string& loadGuid) {
-    std::ostringstream q;
-    q << "SELECT idDocumentMis, ISNULL(CONVERT(varchar(20), [status]), ''), ISNULL(statusText, ''), "
-      << "ISNULL([message], '') "
-      << "FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE "
-      << "WHERE LOAD_GUID = '" << sqlEscape(loadGuid) << "' "
-      << "  AND MATCHED_MSS_SEMD_DOC_ID IS NULL "
-      << "  AND ( [status] IS NOT NULL OR ISNULL(statusText, '') <> '' OR ISNULL([message], '') <> '' ) "
-      << "ORDER BY STAGE_ID;";
-
-    std::vector<std::vector<std::string>> rows;
-    std::string err;
-    if (!db.queryRows(q.str(), 4, rows, err)) {
-        g_log.error("Failed to query leftover NETRIKA statuses for LOAD_GUID=%s: %s", loadGuid.c_str(), err.c_str());
+        g_log.error("Stage INSERT raw date='%s' raw modifiedDate='%s' norm date='%s' norm modifiedDate='%s'",
+            rawDate.c_str(),
+            rawModifiedDate.c_str(),
+            dateVal.c_str(),
+            modifiedDateVal.c_str());
+        g_log.error("Stage INSERT SQL: %s", q.str().c_str());
         return;
     }
 
-    if (rows.empty()) return;
+    g_log.info(
+        "NETRIKA extra fields logged only (not written to MSS_SEMD_DOC): idDocumentMis=%s idSource=%s idFedRequest=%s remdRegNumber=%s goalText=%s sourceTypeName=%s emdTypeId=%s iemkTypeId=%s organization=%s department=%s modifiedDate=%s statusText=%s",
+        jsonGetStr(e, "idDocumentMis").c_str(),
+        jsonGetStr(e, "idSource").c_str(),
+        jsonGetStr(e, "idFedRequest").c_str(),
+        jsonGetStr(e, "remdRegNumber").c_str(),
+        jsonGetStr(e, "goalText").c_str(),
+        jsonGetStr(e, "sourceTypeName").c_str(),
+        jsonGetIntSql(e, "emdTypeId").c_str(),
+        jsonGetIntSql(e, "iemkTypeId").c_str(),
+        jsonGetStr(e, "organization").c_str(),
+        jsonGetStr(e, "department").c_str(),
+        rawModifiedDate.c_str(),
+        jsonGetStr(e, "statusText").c_str()
+    );
+}
 
-    std::ostringstream head;
-    head << "LEFTOVER NETRIKA STATUSES (no MSS_SEMD_DOC match), LOAD_GUID=" << loadGuid
-         << ", rows=" << rows.size();
-    std::string headLine = head.str();
-    std::cout << headLine << std::endl;
-    std::fflush(stdout);
-    g_log.warn("%s", headLine.c_str());
+static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
+    std::ostringstream q;
+    q
+        << "UPDATE s"
+        << " SET s.MOTCONSU_ID_EXTRACTED ="
+        << " CASE"
+        << " WHEN s.idDocumentMis IS NULL THEN NULL"
+        << " WHEN CHARINDEX('_', REVERSE(s.idDocumentMis)) = 0 THEN NULL"
+        << " WHEN ISNUMERIC(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1)) = 1"
+        << " THEN CAST(RIGHT(s.idDocumentMis, CHARINDEX('_', REVERSE(s.idDocumentMis)) - 1) AS bigint)"
+        << " ELSE NULL"
+        << " END"
+        << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
+        << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
+        << " UPDATE s"
+        << " SET s.MATCHED_MSS_SEMD_DOC_ID = d.MSS_SEMD_DOC_ID,"
+        << " s.MATCH_METHOD = 'MOTCONSU_ID'"
+        << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
+        << " INNER JOIN dbo.MSS_SEMD_DOC d ON d.MOTCONSU_ID = s.MOTCONSU_ID_EXTRACTED"
+        << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "';"
+        << " ;WITH latest_stage AS ("
+        << " SELECT s.*, ROW_NUMBER() OVER ("
+        << " PARTITION BY s.MATCHED_MSS_SEMD_DOC_ID"
+        << " ORDER BY s.modifiedDate DESC, s.[date] DESC, s.STAGE_ID DESC"
+        << " ) AS rn"
+        << " FROM dbo.MSS_NETRIKA_EVENTLOG_STAGE s"
+        << " WHERE s.LOAD_GUID = '" << sqlEscape(loadGuid) << "'"
+        << " AND s.MATCHED_MSS_SEMD_DOC_ID IS NOT NULL"
+        << " AND s.[status] IS NOT NULL"
+        << " )"
+        << " UPDATE d SET"
+        << " d.NETRIKA_STATUS = s.[status],"
+        << " d.NETRIKA_MESSAGE = LEFT(ISNULL(s.[message], ''), 4000),"
+        << " d.NETRIKA_EVENT_DATE = s.[date]"
+        << " FROM dbo.MSS_SEMD_DOC d"
+        << " INNER JOIN latest_stage s"
+        << " ON d.MSS_SEMD_DOC_ID = s.MATCHED_MSS_SEMD_DOC_ID"
+        << " AND s.rn = 1;";
 
-    const size_t maxPrint = 200;
-    for (size_t i = 0; i < rows.size() && i < maxPrint; ++i) {
-        const auto& r = rows[i];
-        std::ostringstream line;
-        line << "  [" << (i + 1) << "] idDocumentMis=" << r[0]
-             << " status=" << r[1]
-             << " statusText=" << r[2]
-             << " message=" << r[3];
-        std::string s = line.str();
-        std::cout << s << std::endl;
-        std::fflush(stdout);
-    }
-
-    if (rows.size() > maxPrint) {
-        std::ostringstream tail;
-        tail << "  ... truncated: printed " << maxPrint << " of " << rows.size() << " leftover rows";
-        std::string t = tail.str();
-        std::cout << t << std::endl;
-        std::fflush(stdout);
+    std::string err;
+    if (!db.exec(q.str(), &err)) {
+        g_log.error("Apply NETRIKA statuses failed: %s", err.c_str());
+    } else {
+        g_log.info(
+            "Applied NETRIKA statuses to MSS_SEMD_DOC fields only: NETRIKA_STATUS, NETRIKA_MESSAGE, NETRIKA_EVENT_DATE. LOAD_GUID=%s",
+            loadGuid.c_str()
+        );
     }
 }
 
 static void pollOnce(SqlDb& db, const Config& cfg) {
-    g_log.info("Poll tick: requesting EventLog/GetEvents for today...");
+    std::string today = todayYmd();
+    std::string dateBegin = cfg.date_begin.empty() ? today : cfg.date_begin;
+    std::string dateEnd = cfg.date_end.empty() ? dateBegin : cfg.date_end;
+    std::string modifiedDateBegin = cfg.modified_date_begin.empty() ? dateBegin : cfg.modified_date_begin;
+    std::string modifiedDateEnd = cfg.modified_date_end.empty() ? dateEnd : cfg.modified_date_end;
 
-    std::string body = makeTodayEventsRequestBody(cfg);
-    std::string raw;
-    json parsed;
-    int httpStatus = 0;
-    bool ok = http_post_json(
-        cfg.base_url + cfg.events_endpoint,
-        cfg.token,
-        body,
-        raw,
-        parsed,
-        httpStatus,
-        cfg.http_timeout_ms);
-
-    if (!ok) {
-        g_log.warn("EventLog request failed: HTTP=%d resp=%s", httpStatus, raw.c_str());
-        if (httpStatus >= 400 && httpStatus < 500) {
-            g_log.error("Stopping current poll cycle because EventLog returned HTTP=%d", httpStatus);
-        }
-        return;
-    }
-
-    if (!parsed.is_array()) {
-        g_log.error("EventLog response is not JSON array. Raw=%s", raw.c_str());
-        return;
-    }
-
-    if (parsed.empty()) {
-        g_log.info("EventLog returned 0 rows for today.");
-        return;
-    }
+    g_log.info(
+        "Poll tick: requesting EventLog/GetEvents. dateBegin=%s dateEnd=%s modifiedDateBegin=%s modifiedDateEnd=%s",
+        dateBegin.c_str(),
+        dateEnd.c_str(),
+        modifiedDateBegin.c_str(),
+        modifiedDateEnd.c_str()
+    );
 
     std::string loadGuid = newGuidString();
-    g_log.info("EventLog returned %zu rows. LOAD_GUID=%s", parsed.size(), loadGuid.c_str());
+    size_t dailyRows = fetchEventsToStage(
+        db,
+        cfg,
+        loadGuid,
+        [&](int startRow, int endRow) {
+            return makeEventsRequestBody(
+                cfg,
+                startRow,
+                endRow,
+                dateBegin,
+                dateEnd,
+                modifiedDateBegin,
+                modifiedDateEnd
+            );
+        },
+        "EventLog daily"
+    );
 
-    size_t i = 0;
-    for (const auto& e : parsed) {
-        ++i;
-        dbInsertStageEvent(db, loadGuid, e);
-        if (i <= 5) {
-            g_log.info("Stage sample #%zu: idDocumentMis=%s status=%s statusText=%s",
-                i,
-                jsonGetStr(e, "idDocumentMis").c_str(),
-                jsonGetIntSql(e, "status").c_str(),
-                jsonGetStr(e, "statusText").c_str());
-        }
+    std::vector<std::string> status3Ids = dbGetStatus3IdDocumentMis(db, cfg.top_n);
+    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS=3", status3Ids.size());
+
+    size_t retryRows = 0;
+    for (const auto& idDocumentMis : status3Ids) {
+        retryRows += fetchEventsToStage(
+            db,
+            cfg,
+            loadGuid,
+            [&](int startRow, int endRow) {
+                return makeEventsRequestBody(
+                    cfg,
+                    startRow,
+                    endRow,
+                    "",
+                    "",
+                    "",
+                    "",
+                    idDocumentMis
+                );
+            },
+            "EventLog retry status=3"
+        );
     }
 
-    dbApplyStage(db, loadGuid);
-    logLeftoverNetrikaStatusesToStdout(db, loadGuid);
-    g_log.info("Applied EventLog statuses for LOAD_GUID=%s", loadGuid.c_str());
+    size_t totalRows = dailyRows + retryRows;
+    if (totalRows == 0) {
+        g_log.info("EventLog returned 0 rows (daily + status=3 retry).");
+        return;
+    }
+
+    g_log.info("Applying EventLog statuses for LOAD_GUID=%s totalRows=%zu", loadGuid.c_str(), totalRows);
+    dbApplyStatuses(db, loadGuid);
+    g_log.info("Applied EventLog statuses for LOAD_GUID=%s totalRows=%zu", loadGuid.c_str(), totalRows);
 }
 
 // ------------------------------------------------------------
@@ -910,6 +1146,12 @@ static int runWorker(const std::string& iniPath, const std::string& logDir) {
         return 4;
     }
 
+    pollOnce(db, cfg);
+    g_log.info("Single-run finished.");
+    return 0;
+    // сверху - через windows taskschedule единичный runner
+    // снизу - для background сервиса с таймаутом
+    /*
     while (WaitForSingleObject(g_stopEvent, 0) != WAIT_OBJECT_0) {
         pollOnce(db, cfg);
 
@@ -918,7 +1160,7 @@ static int runWorker(const std::string& iniPath, const std::string& logDir) {
         for (DWORD spent = 0; spent < total; spent += step) {
             if (WaitForSingleObject(g_stopEvent, step) == WAIT_OBJECT_0) break;
         }
-    }
+    }*/
 
     g_log.info("Worker exiting.");
     return 0;
