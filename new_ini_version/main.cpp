@@ -66,32 +66,28 @@ struct ObfuscatedString {
 // ============================================================
 // CONFIGURATION
 // ============================================================
+
 struct Config {
-    // Dynamic variables loaded from the .ini file
     std::string server;
     std::string database;
     std::string odbc_conn;
 
-    // Hardcoded and obfuscated API credentials
     std::string base_url = OBFUSCATE("https://b2b.n3health.ru/n3h-eventlog-api");
     std::string token = OBFUSCATE("N3 2719a600-fbee-ffd3-816c-ac854004ab88");
-    
-    // Other hardcoded parameters
+
     std::string events_endpoint = "/EventLog/GetEvents";
     std::string system_oid = "1.2.643.2.69.1.2.348";
     std::string program_name = "mss_semd_checking";
     std::string sql_login_name = "mss_semd_checking";
-    
+
     int poll_interval_seconds = 3600;
     int top_n = 500;
     int http_timeout_ms = 30000;
-    
-    // Default paths and dates (adjust these to your preferences)
-    std::string log_dir = "C:\\mss\\logs"; 
-    std::string date_begin = "";
-    std::string date_end = "";
-    std::string modified_date_begin = "2026-03-25";
-    std::string modified_date_end = "2026-03-29";
+    std::string log_dir = "C:\\mss\\logs";
+
+    // Use ONLY modified dates
+    std::string modified_date_begin;
+    std::string modified_date_end;
 };
 
 struct EventRow {
@@ -217,23 +213,24 @@ static std::string iniGet(const std::string& path, const std::string& section, c
 // ============================================================
 // INI LOADER
 // ============================================================
+
 static bool loadConfig(const std::string& iniPath, Config& cfg, std::string& err) {
-    // 1. Read ONLY server and database from the INI file
     cfg.server = iniGet(iniPath, "database", "server", "");
     cfg.database = iniGet(iniPath, "database", "database", "");
 
     if (cfg.server.empty()) { err = "ini: [database].server is empty"; return false; }
     if (cfg.database.empty()) { err = "ini: [database].database is empty"; return false; }
 
-    // 2. Safely hardcode and decrypt the SQL credentials
-    // Replace "mss" and "sanitas10122010" if your target deployment uses different credentials
     std::string uid = OBFUSCATE("mss");
     std::string pwd = OBFUSCATE("sanitas10122010");
 
-    // 3. Construct the final ODBC string dynamically
     cfg.odbc_conn = "Driver={ODBC Driver 17 for SQL Server};Server=" + cfg.server +
                     ";Database=" + cfg.database +
                     ";Uid=" + uid + ";Pwd=" + pwd + ";TrustServerCertificate=yes;";
+
+    // Fetch dates from the [params] block in the ini
+    cfg.modified_date_begin = iniGet(iniPath, "params", "modified_date_begin", "");
+    cfg.modified_date_end = iniGet(iniPath, "params", "modified_date_end", "");
 
     return true;
 }
@@ -717,8 +714,6 @@ static std::string todayYmd() {
 static std::string makeEventsRequestBody(const Config& cfg,
                                          int startRow,
                                          int endRow,
-                                         const std::string& dateBegin,
-                                         const std::string& dateEnd,
                                          const std::string& modifiedDateBegin,
                                          const std::string& modifiedDateEnd,
                                          const std::string& idDocumentMis = "") {
@@ -734,8 +729,6 @@ static std::string makeEventsRequestBody(const Config& cfg,
         needComma = true;
     };
 
-    addStrField("dateBegin", dateBegin);
-    addStrField("dateEnd", dateEnd);
     addStrField("modifiedDateBegin", modifiedDateBegin);
     addStrField("modifiedDateEnd", modifiedDateEnd);
     addStrField("idDocumentMis", idDocumentMis);
@@ -1027,16 +1020,14 @@ static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
 }
 
 static void pollOnce(SqlDb& db, const Config& cfg) {
-    std::string today = todayYmd();
-    std::string dateBegin = cfg.date_begin.empty() ? today : cfg.date_begin;
-    std::string dateEnd = cfg.date_end.empty() ? dateBegin : cfg.date_end;
-    std::string modifiedDateBegin = cfg.modified_date_begin.empty() ? dateBegin : cfg.modified_date_begin;
-    std::string modifiedDateEnd = cfg.modified_date_end.empty() ? dateEnd : cfg.modified_date_end;
+    std::string today = todayYmd(); // Gets the current date automatically
+
+    // Fallback to today's date if INI values are empty
+    std::string modifiedDateBegin = cfg.modified_date_begin.empty() ? today : cfg.modified_date_begin;
+    std::string modifiedDateEnd = cfg.modified_date_end.empty() ? today : cfg.modified_date_end;
 
     g_log.info(
-        "Poll tick: requesting EventLog/GetEvents. dateBegin=%s dateEnd=%s modifiedDateBegin=%s modifiedDateEnd=%s",
-        dateBegin.c_str(),
-        dateEnd.c_str(),
+        "Poll tick: requesting EventLog/GetEvents. modifiedDateBegin=%s modifiedDateEnd=%s",
         modifiedDateBegin.c_str(),
         modifiedDateEnd.c_str()
     );
@@ -1051,8 +1042,6 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
                 cfg,
                 startRow,
                 endRow,
-                dateBegin,
-                dateEnd,
                 modifiedDateBegin,
                 modifiedDateEnd
             );
@@ -1070,12 +1059,11 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
             cfg,
             loadGuid,
             [&](int startRow, int endRow) {
+                // Pass empty strings for the modified dates on ID retries
                 return makeEventsRequestBody(
                     cfg,
                     startRow,
                     endRow,
-                    "",
-                    "",
                     "",
                     "",
                     idDocumentMis
@@ -1190,6 +1178,10 @@ static void WINAPI serviceMain(DWORD, LPWSTR*) {
 // Main
 // ------------------------------------------------------------
 int main(int argc, char* argv[]) {
+    // FIX: Set console codepages to 1251 (Cyrillic ANSI) so ODBC error text renders cleanly
+    SetConsoleOutputCP(1251);
+    SetConsoleCP(1251);
+
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     if (argc >= 4 && std::string(argv[1]) == "--console") {
