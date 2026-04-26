@@ -134,6 +134,23 @@ static std::wstring utf8ToWide(const std::string& s) {
     return ws;
 }
 
+// ---> ADD THIS NEW FUNCTION HERE <---
+static std::string utf8ToCp1251(const std::string& utf8) {
+    if (utf8.empty()) return "";
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return "";
+    std::wstring wstr(wlen, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], wlen);
+
+    int alen = WideCharToMultiByte(1251, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (alen <= 0) return "";
+    std::string str(alen, 0);
+    WideCharToMultiByte(1251, 0, wstr.c_str(), -1, &str[0], alen, nullptr, nullptr);
+
+    while (!str.empty() && str.back() == '\0') str.pop_back();
+    return str;
+}
+
 // ------------------------------------------------------------
 // Logger
 // ------------------------------------------------------------
@@ -177,18 +194,43 @@ private:
         oss << nowStr() << " [" << lvl << "] " << msg << "\r\n";
         std::string line = oss.str();
 
+        // ---> ADD THIS CONVERSION <---
+        std::string line1251 = utf8ToCp1251(line);
+
         std::lock_guard<std::mutex> lock(mu_);
         FILE* f = nullptr;
         fopen_s(&f, filePath_.c_str(), "ab");
         if (f) {
-            fwrite(line.data(), 1, line.size(), f);
+            // ---> WRITE line1251 INSTEAD OF line <---
+            fwrite(line1251.data(), 1, line1251.size(), f);
             fclose(f);
         }
         if (g_consoleMode.load()) {
-            std::fwrite(line.data(), 1, line.size(), stdout);
+            // ---> WRITE line1251 INSTEAD OF line <---
+            std::fwrite(line1251.data(), 1, line1251.size(), stdout);
             std::fflush(stdout);
         }
     }
+
+    //void write(const char* lvl, const char* fmt, va_list ap) {
+    //    char msg[8192];
+    //    vsnprintf(msg, sizeof(msg), fmt, ap);
+    //    std::ostringstream oss;
+    //    oss << nowStr() << " [" << lvl << "] " << msg << "\r\n";
+    //    std::string line = oss.str();
+
+    //    std::lock_guard<std::mutex> lock(mu_);
+    //    FILE* f = nullptr;
+    //    fopen_s(&f, filePath_.c_str(), "ab");
+    //    if (f) {
+    //        fwrite(line.data(), 1, line.size(), f);
+    //        fclose(f);
+    //    }
+    //    if (g_consoleMode.load()) {
+    //        std::fwrite(line.data(), 1, line.size(), stdout);
+    //        std::fflush(stdout);
+    //    }
+    //}
 };
 
 static Logger g_log;
@@ -938,32 +980,64 @@ static void dbInsertStageEvent(SqlDb& db, const std::string& loadGuid, const jso
       << "idCaseMis,idDocumentMis,emdType,emdTypeId,iemkTypeId,[status],[message],remdRegNumber,"
       << "idSource,dataSource,statusText,goalText,idFedRequest,transferId,goal,idDataSource,sourceTypeName"
       << ") VALUES ("
-      << "'" << sqlEscape(loadGuid) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "idLpu")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "name")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "systemName")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "systemOid")) << "',"
+      << "N'" << sqlEscape(loadGuid) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "idLpu")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "name")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "systemName")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "systemOid")) << "',"
       << (dateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(dateVal) + "', 121)") << ","
-      << (modifiedDateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(modifiedDateVal) + "', 121)") << ","      << "'" << sqlEscape(jsonGetStr(e, "organization")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "department")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "idCaseMis")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "idDocumentMis")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "emdType")) << "',"
+      << (modifiedDateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(modifiedDateVal) + "', 121)") << ","
+      << "N'" << sqlEscape(jsonGetStr(e, "organization")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "department")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "idCaseMis")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "idDocumentMis")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "emdType")) << "',"
       << jsonGetIntSql(e, "emdTypeId") << ","
       << jsonGetIntSql(e, "iemkTypeId") << ","
       << jsonGetIntSql(e, "status") << ","
-      << "'" << sqlEscape(jsonGetStr(e, "message")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "remdRegNumber")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "idSource")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "dataSource")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "statusText")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "goalText")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "idFedRequest")) << "',"
-      << "'" << sqlEscape(jsonGetStr(e, "transferId")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "message")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "remdRegNumber")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "idSource")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "dataSource")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "statusText")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "goalText")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "idFedRequest")) << "',"
+      << "N'" << sqlEscape(jsonGetStr(e, "transferId")) << "',"
       << jsonGetIntSql(e, "goal") << ","
       << jsonGetIntSql(e, "idDataSource") << ","
-      << "'" << sqlEscape(jsonGetStr(e, "sourceTypeName")) << "'"
+      << "N'" << sqlEscape(jsonGetStr(e, "sourceTypeName")) << "'"
       << ");";
+    //q << "INSERT INTO dbo.MSS_NETRIKA_EVENTLOG_STAGE ("
+    //  << "LOAD_GUID,idLpu,name,systemName,systemOid,[date],modifiedDate,organization,department,"
+    //  << "idCaseMis,idDocumentMis,emdType,emdTypeId,iemkTypeId,[status],[message],remdRegNumber,"
+    //  << "idSource,dataSource,statusText,goalText,idFedRequest,transferId,goal,idDataSource,sourceTypeName"
+    //  << ") VALUES ("
+    //  << "'" << sqlEscape(loadGuid) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "idLpu")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "name")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "systemName")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "systemOid")) << "',"
+    //  << (dateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(dateVal) + "', 121)") << ","
+    //  << (modifiedDateVal.empty() ? "NULL" : "CONVERT(datetime, '" + sqlEscape(modifiedDateVal) + "', 121)") << ","      << "'" << sqlEscape(jsonGetStr(e, "organization")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "department")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "idCaseMis")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "idDocumentMis")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "emdType")) << "',"
+    //  << jsonGetIntSql(e, "emdTypeId") << ","
+    //  << jsonGetIntSql(e, "iemkTypeId") << ","
+    //  << jsonGetIntSql(e, "status") << ","
+    //  << "'" << sqlEscape(jsonGetStr(e, "message")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "remdRegNumber")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "idSource")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "dataSource")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "statusText")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "goalText")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "idFedRequest")) << "',"
+    //  << "'" << sqlEscape(jsonGetStr(e, "transferId")) << "',"
+    //  << jsonGetIntSql(e, "goal") << ","
+    //  << jsonGetIntSql(e, "idDataSource") << ","
+    //  << "'" << sqlEscape(jsonGetStr(e, "sourceTypeName")) << "'"
+    //  << ");";
 
     std::string err;
     if (!db.exec(q.str(), &err)) {
