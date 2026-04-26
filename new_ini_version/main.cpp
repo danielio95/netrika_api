@@ -891,27 +891,7 @@ static std::string newGuidString() {
 }
 
 static std::string jsonGetStr(const json& e, const char* key) {
-    if (!e.contains(key) || e[key].is_null()) return "";
-
-    // Get the raw UTF-8 string from the JSON
-    std::string utf8_val = e[key].get<std::string>();
-
-    // 1. Convert from UTF-8 to WideString (UTF-16)
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8_val.c_str(), -1, nullptr, 0);
-    if (wlen <= 0) return "";
-    std::wstring wstr(wlen, 0);
-    MultiByteToWideChar(CP_UTF8, 0, utf8_val.c_str(), -1, &wstr[0], wlen);
-
-    // 2. Convert from WideString to Windows-1251 (ANSI)
-    int alen = WideCharToMultiByte(1251, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (alen <= 0) return "";
-    std::string astr(alen, 0);
-    WideCharToMultiByte(1251, 0, wstr.c_str(), -1, &astr[0], alen, nullptr, nullptr);
-
-    // Remove the trailing null terminator
-    while (!astr.empty() && astr.back() == '\0') astr.pop_back();
-
-    return astr;
+    return e.contains(key) && !e[key].is_null() ? e[key].get<std::string>() : "";
 }
 
 //static std::string jsonGetStr(const json& e, const char* key) {
