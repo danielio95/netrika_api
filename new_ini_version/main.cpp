@@ -80,7 +80,7 @@ struct Config {
     std::string program_name = "mss_semd_checking";
     std::string sql_login_name = "mss_semd_checking";
 
-    int poll_interval_seconds = 3600;
+    //int poll_interval_seconds = 3600;
     int top_n = 500;
     int http_timeout_ms = 30000;
     std::string log_dir = "C:\\mss\\logs";
@@ -221,8 +221,9 @@ static bool loadConfig(const std::string& iniPath, Config& cfg, std::string& err
     if (cfg.server.empty()) { err = "ini: [database].server is empty"; return false; }
     if (cfg.database.empty()) { err = "ini: [database].database is empty"; return false; }
 
-    std::string uid = OBFUSCATE("mss");
-    std::string pwd = OBFUSCATE("sanitas10122010");
+    // --- UPDATED CREDENTIALS ---
+    std::string uid = OBFUSCATE("mss_semd_checking");
+    std::string pwd = OBFUSCATE("l+Dg-Z60>37S");
 
     cfg.odbc_conn = "Driver={ODBC Driver 17 for SQL Server};Server=" + cfg.server +
                     ";Database=" + cfg.database +
@@ -742,21 +743,21 @@ static std::string makeEventsRequestBody(const Config& cfg,
     return ss.str();
 }
 
-static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
-    std::vector<std::string> ids;
-    std::ostringstream q;
-    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
-      << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
-      << " WHERE NETRIKA_STATUS = 3"
-      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
-      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
-    std::string err;
-    if (!db.queryStringColumn(q.str(), ids, err)) {
-        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
-        ids.clear();
-    }
-    return ids;
-}
+//static std::vector<std::string> dbGetStatus3IdDocumentMis(SqlDb& db, int topN) {
+//    std::vector<std::string> ids;
+//    std::ostringstream q;
+//    q << "SELECT DISTINCT TOP (" << std::max(1, topN) << ") LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS))"
+//      << " FROM dbo.MSS_SEMD_DOC WITH (NOLOCK)"
+//      << " WHERE NETRIKA_STATUS = 3"
+//      << " AND ISNULL(LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS)), '') <> ''"
+//      << " ORDER BY LTRIM(RTRIM(NETRIKA_IDDOCUMENTMIS));";
+//    std::string err;
+//    if (!db.queryStringColumn(q.str(), ids, err)) {
+//        g_log.error("Failed to get NETRIKA_STATUS=3 idDocumentMis list: %s", err.c_str());
+//        ids.clear();
+//    }
+//    return ids;
+//}
 
 static std::string jsonGetStr(const json& e, const char* key);
 static std::string jsonGetIntSql(const json& e, const char* key);
@@ -848,8 +849,32 @@ static std::string newGuidString() {
 }
 
 static std::string jsonGetStr(const json& e, const char* key) {
-    return e.contains(key) && !e[key].is_null() ? e[key].get<std::string>() : "";
+    if (!e.contains(key) || e[key].is_null()) return "";
+
+    // Get the raw UTF-8 string from the JSON
+    std::string utf8_val = e[key].get<std::string>();
+
+    // 1. Convert from UTF-8 to WideString (UTF-16)
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8_val.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return "";
+    std::wstring wstr(wlen, 0);
+    MultiByteToWideChar(CP_UTF8, 0, utf8_val.c_str(), -1, &wstr[0], wlen);
+
+    // 2. Convert from WideString to Windows-1251 (ANSI)
+    int alen = WideCharToMultiByte(1251, 0, wstr.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (alen <= 0) return "";
+    std::string astr(alen, 0);
+    WideCharToMultiByte(1251, 0, wstr.c_str(), -1, &astr[0], alen, nullptr, nullptr);
+
+    // Remove the trailing null terminator
+    while (!astr.empty() && astr.back() == '\0') astr.pop_back();
+
+    return astr;
 }
+
+//static std::string jsonGetStr(const json& e, const char* key) {
+//    return e.contains(key) && !e[key].is_null() ? e[key].get<std::string>() : "";
+//}
 
 static std::string jsonGetIntSql(const json& e, const char* key) {
     if (!e.contains(key) || e[key].is_null()) return "NULL";
@@ -1020,9 +1045,7 @@ static void dbApplyStatuses(SqlDb& db, const std::string& loadGuid) {
 }
 
 static void pollOnce(SqlDb& db, const Config& cfg) {
-    std::string today = todayYmd(); // Gets the current date automatically
-
-    // Fallback to today's date if INI values are empty
+    std::string today = todayYmd();
     std::string modifiedDateBegin = cfg.modified_date_begin.empty() ? today : cfg.modified_date_begin;
     std::string modifiedDateEnd = cfg.modified_date_end.empty() ? today : cfg.modified_date_end;
 
@@ -1033,7 +1056,7 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
     );
 
     std::string loadGuid = newGuidString();
-    size_t dailyRows = fetchEventsToStage(
+    size_t totalRows = fetchEventsToStage(
         db,
         cfg,
         loadGuid,
@@ -1049,33 +1072,8 @@ static void pollOnce(SqlDb& db, const Config& cfg) {
         "EventLog daily"
     );
 
-    std::vector<std::string> status3Ids = dbGetStatus3IdDocumentMis(db, cfg.top_n);
-    g_log.info("EventLog retry: found %zu docs with NETRIKA_STATUS=3", status3Ids.size());
-
-    size_t retryRows = 0;
-    for (const auto& idDocumentMis : status3Ids) {
-        retryRows += fetchEventsToStage(
-            db,
-            cfg,
-            loadGuid,
-            [&](int startRow, int endRow) {
-                // Pass empty strings for the modified dates on ID retries
-                return makeEventsRequestBody(
-                    cfg,
-                    startRow,
-                    endRow,
-                    "",
-                    "",
-                    idDocumentMis
-                );
-            },
-            "EventLog retry status=3"
-        );
-    }
-
-    size_t totalRows = dailyRows + retryRows;
     if (totalRows == 0) {
-        g_log.info("EventLog returned 0 rows (daily + status=3 retry).");
+        g_log.info("EventLog returned 0 rows.");
         return;
     }
 
@@ -1117,6 +1115,11 @@ static int runWorker(const std::string& iniPath, const std::string& logDir) {
         return 2;
     }
 
+    // --- FIX: Override the hardcoded log_dir with the command-line argument ---
+    if (!logDir.empty()) {
+        cfg.log_dir = logDir;
+    }
+
     if (!cfg.log_dir.empty()) {
         g_log.init(cfg.log_dir);
     }
@@ -1137,8 +1140,10 @@ static int runWorker(const std::string& iniPath, const std::string& logDir) {
     pollOnce(db, cfg);
     g_log.info("Single-run finished.");
     return 0;
+
     // сверху - через windows taskschedule единичный runner
     // снизу - для background сервиса с таймаутом
+
     /*
     while (WaitForSingleObject(g_stopEvent, 0) != WAIT_OBJECT_0) {
         pollOnce(db, cfg);
@@ -1149,9 +1154,6 @@ static int runWorker(const std::string& iniPath, const std::string& logDir) {
             if (WaitForSingleObject(g_stopEvent, step) == WAIT_OBJECT_0) break;
         }
     }*/
-
-    g_log.info("Worker exiting.");
-    return 0;
 }
 
 static void WINAPI serviceMain(DWORD, LPWSTR*) {
