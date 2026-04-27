@@ -1,0 +1,14 @@
+USE [Netrika];
+GO
+
+-- 1. Create a database user linked to your newly created login
+CREATE USER [mss_semd_checking] FOR LOGIN [mss_semd_checking];
+GO
+
+-- 2. Grant the user permission to read data from all tables in the database
+ALTER ROLE [db_datareader] ADD MEMBER [mss_semd_checking];
+GO
+
+-- 3. Grant the user permission to insert, update, and delete data in all tables
+ALTER ROLE [db_datawriter] ADD MEMBER [mss_semd_checking];
+GO
